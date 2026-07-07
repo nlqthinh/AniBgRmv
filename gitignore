@@ -1,0 +1,112 @@
+# =========================
+# Python cache / bytecode
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+*.env
+.env
+.env.*
+
+# =========================
+# IDE / editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =========================
+# App outputs / debug files
+# =========================
+outputs/
+output/
+debug_outputs/
+temp/
+tmp/
+logs/
+*.log
+
+# Generated result folders from current app
+01_masks/
+02_cutouts/
+03_preview_white/
+04_preview_checker/
+
+# =========================
+# PyInstaller build artifacts
+# =========================
+build/
+dist/
+*.spec
+
+# =========================
+# Large ML model files
+# Do not push model checkpoints directly to GitHub.
+# Use Google Drive, Hugging Face, GitHub Release, or Git LFS if needed.
+# =========================
+models/*
+!models/.gitkeep
+!models/README.md
+
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+*.tflite
+*.h5
+
+# =========================
+# Datasets / local test images
+# Keep only tiny public demo samples if needed.
+# =========================
+dataset/
+datasets/
+data/
+test_images/
+input_images/
+raw_images/
+cutout/
+cutouts/
+masks/
+
+# =========================
+# Video / media outputs
+# =========================
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.gif
+
+# =========================
+# Jupyter / notebook checkpoints
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Windows shortcuts / installers
+# =========================
+*.lnk
+*.msi
+*.exe
+
+

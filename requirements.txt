@@ -1,0 +1,9 @@
+pyside6
+pillow
+opencv-python
+numpy
+pandas
+segmentation-models-pytorch
+timm
+albumentations
+pyinstaller
