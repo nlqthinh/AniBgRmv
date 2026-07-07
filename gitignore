@@ -1,112 +1,48 @@
 # =========================
-# Python cache / bytecode
+# Local model folders
 # =========================
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+model/
+models/
+model/**
+models/**
 
-# =========================
-# Virtual environments
-# =========================
-.venv/
-venv/
-env/
-ENV/
-*.env
-.env
-.env.*
-
-# =========================
-# IDE / editor
-# =========================
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-
-# =========================
-# App outputs / debug files
-# =========================
-outputs/
-output/
-debug_outputs/
-temp/
-tmp/
-logs/
-*.log
-
-# Generated result folders from current app
-01_masks/
-02_cutouts/
-03_preview_white/
-04_preview_checker/
-
-# =========================
-# PyInstaller build artifacts
-# =========================
-build/
-dist/
-*.spec
-
-# =========================
-# Large ML model files
-# Do not push model checkpoints directly to GitHub.
-# Use Google Drive, Hugging Face, GitHub Release, or Git LFS if needed.
-# =========================
-models/*
-!models/.gitkeep
+# Giữ lại file hướng dẫn nếu có
 !models/README.md
-
-*.pth
-*.pt
-*.ckpt
-*.safetensors
-*.onnx
-*.engine
-*.tflite
-*.h5
+!models/.gitkeep
+!model/README.md
+!model/.gitkeep
 
 # =========================
-# Datasets / local test images
-# Keep only tiny public demo samples if needed.
+# Local image folders
 # =========================
-dataset/
-datasets/
-data/
+image/
+images/
+imgs/
+pictures/
+test_image/
 test_images/
+input_image/
 input_images/
+raw_image/
 raw_images/
-cutout/
-cutouts/
-masks/
+sample_images/
+debug_images/
 
 # =========================
-# Video / media outputs
+# Common image files
+# Nếu repo có ảnh UI/icon cần push, để icon trong assets/ rồi bỏ dòng assets khỏi ignore.
 # =========================
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.webm
-*.gif
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.tif
+*.tiff
 
-# =========================
-# Jupyter / notebook checkpoints
-# =========================
-.ipynb_checkpoints/
-
-# =========================
-# Windows shortcuts / installers
-# =========================
-*.lnk
-*.msi
-*.exe
-
-
+# Nhưng vẫn cho phép README dùng ảnh trong docs nếu cần
+!docs/**/*.png
+!docs/**/*.jpg
+!docs/**/*.jpeg
+!README_images/**/*.png
+!README_images/**/*.jpg
