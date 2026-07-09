@@ -20,7 +20,10 @@ from PySide6.QtWidgets import (
 from bg_engine import BgRemoveEngine
 
 
-CHECKPOINT_PATH = "models/F2_A1_mild_aug_from_FP3_768_unet_mit_b1_3k5_best.pth"
+# M9 default pipeline:
+# image -> F2_A1 ONNX -> loose trimap -> ViTMatte M6 ONNX -> final alpha -> cutout PNG
+F2_A1_ONNX_PATH = "models/f2a1_unet_mit_b1_768.onnx"
+M6_ONNX_PATH = "models/m6_vitmatte_m6_768.onnx"
 OUTPUT_DIR = "outputs"
 
 
@@ -75,7 +78,7 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Anime Background Remover - F2_A1")
+        self.setWindowTitle("Anime Background Remover - F2_A1 → ViTMatte M6")
         self.resize(1000, 700)
 
         self.engine = None
@@ -127,10 +130,13 @@ class MainWindow(QWidget):
     def load_model(self):
         try:
             self.engine = BgRemoveEngine(
-                checkpoint_path=CHECKPOINT_PATH,
+                f2a1_model_path=F2_A1_ONNX_PATH,
+                m6_model_path=M6_ONNX_PATH,
                 size=768,
             )
-            self.status_label.setText(f"Model đã sẵn sàng. Device: {self.engine.device}")
+            self.status_label.setText(
+                f"Pipeline đã sẵn sàng: F2_A1 → M6 | Runtime: {self.engine.runtime_info}"
+            )
             self.btn_select.setEnabled(True)
             self.btn_batch.setEnabled(True)
         except Exception as e:
@@ -175,7 +181,7 @@ class MainWindow(QWidget):
             return
 
         self.btn_cut.setEnabled(False)
-        self.status_label.setText("Đang cắt nền...")
+        self.status_label.setText("Đang cắt nền bằng F2_A1 → ViTMatte M6...")
         self.progress.setRange(0, 0)
 
         self.thread = QThread()
@@ -240,7 +246,7 @@ class MainWindow(QWidget):
         self.btn_cut.setEnabled(False)
         self.progress.setRange(0, len(paths))
         self.progress.setValue(0)
-        self.status_label.setText(f"Đang batch {len(paths)} ảnh...")
+        self.status_label.setText(f"Đang batch {len(paths)} ảnh bằng F2_A1 → M6...")
 
         batch_output = str(Path(OUTPUT_DIR) / "batch")
 

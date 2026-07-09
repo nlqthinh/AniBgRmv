@@ -1,0 +1,10 @@
+torch
+onnx
+onnxruntime
+onnxscript
+segmentation-models-pytorch
+timm
+transformers
+pillow
+opencv-python
+numpy

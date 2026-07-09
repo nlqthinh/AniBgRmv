@@ -3,7 +3,5 @@ pillow
 opencv-python
 numpy
 pandas
-segmentation-models-pytorch
-timm
-albumentations
+onnxruntime
 pyinstaller

@@ -85,3 +85,4 @@ data/
 # Notebook checkpoints
 # =========================
 .ipynb_checkpoints/
+*.data
