@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 from transformers import VitMatteForImageMatting
 
+
 class ViTMatteExportWrapper(nn.Module):
     def __init__(self, model: VitMatteForImageMatting):
         super().__init__()
@@ -27,38 +28,19 @@ def clean_state_dict(state: dict):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--pt",
-        default="models/m6_vitmatte_tune_best.pt",
-        help="Path tới M6 ViTMatte .pt",
-    )
-    parser.add_argument(
-        "--base_model",
-        default="hustvl/vitmatte-small-distinctions-646",
-        help="HF base model dùng khi fine-tune M6",
-    )
-    parser.add_argument(
-        "--out",
-        default="models/m6_vitmatte_m6_768.onnx",
-        help="Path ONNX output",
-    )
+    parser.add_argument("--pt", default="models/m6_vitmatte_tune_best.pt")
+    parser.add_argument("--base_model", default="hustvl/vitmatte-small-distinctions-646")
+    parser.add_argument("--out", default="models/m6_vitmatte_m6_768.onnx")
     parser.add_argument("--size", type=int, default=768)
-    parser.add_argument("--opset", type=int, default=17)
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Bật strict=True nếu checkpoint chắc chắn khớp 100% với HF model.",
-    )
+    parser.add_argument("--opset", type=int, default=18)
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--external_data", action="store_true")
     args = parser.parse_args()
 
     pt_path = Path(args.pt)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Processor call is not used during export, but loading it here helps confirm
-    # the base model package is available and compatible.
-    # Không cần AutoImageProcessor khi export ONNX.
-    # _ = AutoImageProcessor.from_pretrained(args.base_model)
     model = VitMatteForImageMatting.from_pretrained(args.base_model)
 
     ckpt = torch.load(pt_path, map_location="cpu")
@@ -86,7 +68,6 @@ def main():
     wrapper = ViTMatteExportWrapper(model)
     wrapper.eval()
 
-    # ViTMatte input is 4 channels: RGB image normalized + trimap rescaled.
     dummy = torch.randn(1, 4, args.size, args.size, dtype=torch.float32)
 
     torch.onnx.export(
@@ -97,6 +78,7 @@ def main():
         output_names=["alpha"],
         opset_version=args.opset,
         do_constant_folding=True,
+        external_data=args.external_data,
     )
 
     print(f"Export xong M6 ViTMatte ONNX: {out_path}")

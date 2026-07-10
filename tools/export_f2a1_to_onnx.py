@@ -53,18 +53,11 @@ def load_state(checkpoint_path: Path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--pth",
-        default="models/F2_A1_mild_aug_from_FP3_768_unet_mit_b1_3k5_best.pth",
-        help="Path tới F2_A1 .pth",
-    )
-    parser.add_argument(
-        "--out",
-        default="models/f2a1_unet_mit_b1_768.onnx",
-        help="Path ONNX output",
-    )
+    parser.add_argument("--pth", default="models/F2_A1_mild_aug_from_FP3_768_unet_mit_b1_3k5_best.pth")
+    parser.add_argument("--out", default="models/f2a1_unet_mit_b1_768.onnx")
     parser.add_argument("--size", type=int, default=768)
-    parser.add_argument("--opset", type=int, default=17)
+    parser.add_argument("--opset", type=int, default=18)
+    parser.add_argument("--external_data", action="store_true")
     args = parser.parse_args()
 
     pth_path = Path(args.pth)
@@ -88,6 +81,7 @@ def main():
         output_names=["alpha"],
         opset_version=args.opset,
         do_constant_folding=True,
+        external_data=args.external_data,
     )
 
     print(f"Export xong F2_A1 ONNX: {out_path}")
