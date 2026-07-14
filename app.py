@@ -1,4 +1,6 @@
+import json
 import os
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -29,16 +31,153 @@ from bg_engine import BgRemoveEngine
 # APP CONFIG
 # =========================
 
-# Nếu bạn đổi tên model ONNX mới, sửa 2 dòng này.
-F2_A1_ONNX_PATH = "models/f3_unet_mit_b1_768.onnx"
-M6_ONNX_PATH = "models/m9_vitmatte_best_768.onnx"
+CONFIG_FILE_NAME = "app_config.json"
 
-OUTPUT_ROOT = "outputs"
-SINGLE_OUTPUT_DIR = str(Path(OUTPUT_ROOT) / "single_saved")
-BATCH_OUTPUT_DIR = str(Path(OUTPUT_ROOT) / "batch_saved")
+DEFAULT_APP_CONFIG = {
+    "_note": (
+        "Relative paths are resolved from the folder containing app.py "
+        "or AniBGRmv.exe. On Windows, using forward slash paths is recommended, "
+        "for example: D:/AniBGRmv/output/single_saved"
+    ),
+    "model": {
+        "unet_onnx_path": "models/f2a1_unet_mit_b1_768.onnx",
+        "vitmatte_onnx_path": "models/m6_vitmatte_m6_768.onnx",
+    },
+    "output": {
+        "single_output_dir": "output/single_saved",
+        "batch_output_dir": "output/batch_saved",
+        "save_debug_outputs": True,
+    },
+    "batch": {
+        "max_batch_images": 30,
+    },
+}
 
-# Bản dev/debug: True để còn xem alpha/trimap. Bản release có thể đổi False.
-SAVE_DEBUG_OUTPUTS = True
+
+# Source mode: config nằm cạnh app.py.
+# PyInstaller exe mode: config nằm cạnh AniBGRmv.exe.
+def get_app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_BASE_DIR = get_app_base_dir()
+
+
+def deep_merge_config(default: dict, user: dict) -> dict:
+    """
+    Merge config để user có thể thiếu vài field mà app vẫn có default an toàn.
+    """
+    merged = dict(default)
+    for key, value in user.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def get_external_config_path() -> Path:
+    """
+    Config người dùng sửa sau khi build.
+
+    Source mode:
+        project/app_config.json
+
+    Exe mode:
+        dist/AniBGRmv/app_config.json, nằm cạnh AniBGRmv.exe
+    """
+    return APP_BASE_DIR / CONFIG_FILE_NAME
+
+
+def get_bundled_config_path() -> Path:
+    """
+    Config được PyInstaller bundle vào _internal/_MEIPASS.
+    Chỉ dùng làm seed lần đầu nếu chưa có external config cạnh exe.
+    """
+    return Path(getattr(sys, "_MEIPASS", APP_BASE_DIR)) / CONFIG_FILE_NAME
+
+
+def get_config_path() -> Path:
+    # Hàm này dùng để hiển thị path config thật sự user nên sửa.
+    return get_external_config_path()
+
+
+def write_default_config(config_path: Path):
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(DEFAULT_APP_CONFIG, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def ensure_external_config_exists() -> Path:
+    """
+    Quy tắc:
+    1. Nếu đã có app_config.json cạnh exe/app.py -> dùng file đó.
+    2. Nếu chưa có, nhưng có config được bundle -> copy bundle ra cạnh exe/app.py.
+    3. Nếu cả hai đều không có -> tạo default config.
+
+    Lý do:
+    - Người dùng cần sửa config sau khi build mà không rebuild.
+    - PyInstaller onedir có thể đặt data trong _internal, không phải cạnh exe.
+    """
+    external_config = get_external_config_path()
+    bundled_config = get_bundled_config_path()
+
+    if external_config.exists():
+        return external_config
+
+    external_config.parent.mkdir(parents=True, exist_ok=True)
+
+    if bundled_config.exists() and bundled_config.resolve() != external_config.resolve():
+        shutil.copy2(bundled_config, external_config)
+        return external_config
+
+    write_default_config(external_config)
+    return external_config
+
+
+def load_app_config() -> dict:
+    config_path = ensure_external_config_exists()
+
+    try:
+        user_config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"File cấu hình {config_path} không phải JSON hợp lệ. "
+            f"Hãy sửa JSON hoặc xóa file để app tự tạo lại. Chi tiết: {e}"
+        ) from e
+
+    if not isinstance(user_config, dict):
+        raise ValueError(f"File cấu hình {config_path} phải là JSON object.")
+
+    return deep_merge_config(DEFAULT_APP_CONFIG, user_config)
+
+
+def resolve_app_path(path_value: str) -> Path:
+    """
+    Đường dẫn tuyệt đối: dùng nguyên.
+    Đường dẫn tương đối: hiểu là nằm dưới APP_BASE_DIR.
+    """
+    p = Path(path_value).expanduser()
+    if p.is_absolute():
+        return p
+    return APP_BASE_DIR / p
+
+
+APP_CONFIG = load_app_config()
+
+F2_A1_ONNX_PATH = str(resolve_app_path(APP_CONFIG["model"]["unet_onnx_path"]))
+M6_ONNX_PATH = str(resolve_app_path(APP_CONFIG["model"]["vitmatte_onnx_path"]))
+
+MAX_BATCH_IMAGES = int(APP_CONFIG["batch"]["max_batch_images"])
+
+SINGLE_OUTPUT_DIR = str(resolve_app_path(APP_CONFIG["output"]["single_output_dir"]))
+BATCH_OUTPUT_DIR = str(resolve_app_path(APP_CONFIG["output"]["batch_output_dir"]))
+
+SAVE_DEBUG_OUTPUTS = bool(APP_CONFIG["output"]["save_debug_outputs"])
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -50,18 +189,20 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 BUTTON_STYLE = """
 QPushButton {
     font-size: 15px;
-    font-weight: 600;
+    font-weight: 700;
     padding: 10px 18px;
     min-height: 42px;
     border-radius: 10px;
     border: 1px solid #B8B8B8;
+    color: #000000;
     background: #F6F6F6;
 }
 QPushButton:hover {
+    color: #000000;
     background: #ECECEC;
 }
 QPushButton:disabled {
-    color: #999999;
+    color: #777777;
     background: #EEEEEE;
     border: 1px solid #DDDDDD;
 }
@@ -70,21 +211,22 @@ QPushButton:disabled {
 PRIMARY_BUTTON_STYLE = """
 QPushButton {
     font-size: 15px;
-    font-weight: 800;
+    font-weight: 900;
     padding: 10px 22px;
     min-height: 44px;
     border-radius: 10px;
-    border: 1px solid #1B56D9;
-    color: white;
-    background: #2563EB;
+    border: 1px solid #159447;
+    color: #000000;
+    background: #35D06F;
 }
 QPushButton:hover {
-    background: #1D4ED8;
+    color: #000000;
+    background: #22C55E;
 }
 QPushButton:disabled {
-    color: #E5E5E5;
-    background: #9AAFEA;
-    border: 1px solid #9AAFEA;
+    color: #777777;
+    background: #BDEECC;
+    border: 1px solid #BDEECC;
 }
 """
 
@@ -102,6 +244,28 @@ QPushButton {
 QPushButton:hover {
     background: #C62828;
     border: 1px solid #C62828;
+}
+"""
+
+CANCEL_BUTTON_STYLE = """
+QPushButton {
+    font-size: 15px;
+    font-weight: 900;
+    padding: 9px 22px;
+    min-height: 40px;
+    border-radius: 10px;
+    border: 1px solid #000000;
+    color: #FF2B2B;
+    background: #000000;
+}
+QPushButton:hover {
+    color: #FF4D4D;
+    background: #171717;
+}
+QPushButton:disabled {
+    color: #B54B4B;
+    background: #222222;
+    border: 1px solid #222222;
 }
 """
 
@@ -176,16 +340,30 @@ def center_button_row(*buttons: QPushButton) -> QHBoxLayout:
 
 class SingleCutWorker(QObject):
     finished = Signal(dict)
+    canceled = Signal()
     error = Signal(str)
 
     def __init__(self, engine: BgRemoveEngine, image_path: str):
         super().__init__()
         self.engine = engine
         self.image_path = image_path
+        self.cancel_requested = False
+
+    def cancel(self):
+        self.cancel_requested = True
 
     def run(self):
         try:
+            if self.cancel_requested:
+                self.canceled.emit()
+                return
+
             result = self.engine.process_for_preview(self.image_path)
+
+            if self.cancel_requested:
+                self.canceled.emit()
+                return
+
             self.finished.emit(result)
         except Exception:
             self.error.emit(traceback.format_exc())
@@ -194,12 +372,17 @@ class SingleCutWorker(QObject):
 class BatchCutWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(list)
+    canceled = Signal()
     error = Signal(str)
 
     def __init__(self, engine: BgRemoveEngine, image_paths: list[str]):
         super().__init__()
         self.engine = engine
         self.image_paths = image_paths
+        self.cancel_requested = False
+
+    def cancel(self):
+        self.cancel_requested = True
 
     def run(self):
         try:
@@ -207,8 +390,17 @@ class BatchCutWorker(QObject):
             total = len(self.image_paths)
 
             for idx, path in enumerate(self.image_paths, start=1):
+                if self.cancel_requested:
+                    self.canceled.emit()
+                    return
+
                 self.progress.emit(idx - 1, total, f"Đang cắt: {Path(path).name}")
                 result = self.engine.process_for_preview(path)
+
+                if self.cancel_requested:
+                    self.canceled.emit()
+                    return
+
                 results.append(result)
                 self.progress.emit(idx, total, f"Đã cắt: {Path(path).name}")
 
@@ -271,15 +463,16 @@ class UploadPreviewCanvas(QFrame):
 
     State:
     - upload: hiện vùng upload.
-    - loading: hiện thanh tiến trình.
+    - loading: hiện thanh tiến trình + nút Dừng cắt.
     - preview: hiện ảnh preview + nút X.
     """
 
     clicked = Signal()
     filesDropped = Signal(list)
     clearRequested = Signal()
+    cancelRequested = Signal()
 
-    def __init__(self, title: str, subtitle: str):
+    def __init__(self, title: str):
         super().__init__()
         self.setAcceptDrops(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -330,11 +523,6 @@ class UploadPreviewCanvas(QFrame):
             """
         )
 
-        self.subtitle_label = QLabel(subtitle)
-        self.subtitle_label.setAlignment(Qt.AlignCenter)
-        self.subtitle_label.setWordWrap(True)
-        self.subtitle_label.setStyleSheet("font-size: 15px; color: #333333;")
-
         self.preview_label = QLabel()
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setVisible(False)
@@ -348,13 +536,18 @@ class UploadPreviewCanvas(QFrame):
         self.progress.setMinimumWidth(420)
         self.progress.setVisible(False)
 
+        self.btn_cancel = QPushButton("Dừng cắt")
+        self.btn_cancel.setStyleSheet(CANCEL_BUTTON_STYLE)
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.clicked.connect(self.cancelRequested.emit)
+
         center_box = QVBoxLayout()
         center_box.setSpacing(16)
         center_box.addStretch(1)
         center_box.addWidget(self.title_label, alignment=Qt.AlignCenter)
-        center_box.addWidget(self.subtitle_label)
         center_box.addWidget(self.loading_label)
         center_box.addWidget(self.progress, alignment=Qt.AlignCenter)
+        center_box.addWidget(self.btn_cancel, alignment=Qt.AlignCenter)
         center_box.addWidget(self.preview_label)
         center_box.addStretch(1)
 
@@ -370,23 +563,31 @@ class UploadPreviewCanvas(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.btn_clear.setVisible(False)
         self.title_label.setVisible(True)
-        self.subtitle_label.setVisible(True)
         self.loading_label.setVisible(False)
         self.progress.setVisible(False)
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.setEnabled(True)
         self.preview_label.clear()
         self.preview_label.setVisible(False)
         self.setEnabled(True)
 
-    def set_loading_mode(self, text: str, current: int | None = None, total: int | None = None):
+    def set_loading_mode(
+        self,
+        text: str,
+        current: int | None = None,
+        total: int | None = None,
+        allow_cancel: bool = True,
+    ):
         self._mode = "loading"
         self.setCursor(Qt.ArrowCursor)
         self.btn_clear.setVisible(False)
         self.title_label.setVisible(False)
-        self.subtitle_label.setVisible(False)
         self.preview_label.setVisible(False)
         self.loading_label.setVisible(True)
         self.loading_label.setText(text)
         self.progress.setVisible(True)
+        self.btn_cancel.setVisible(allow_cancel)
+        self.btn_cancel.setEnabled(allow_cancel)
 
         if current is None or total is None or total <= 0:
             self.progress.setRange(0, 0)
@@ -394,14 +595,17 @@ class UploadPreviewCanvas(QFrame):
             self.progress.setRange(0, total)
             self.progress.setValue(current)
 
+    def set_cancel_waiting_mode(self, text: str = "Đang hủy thao tác..."):
+        self.set_loading_mode(text, allow_cancel=False)
+
     def set_preview_pil(self, pil_image, caption: str = ""):
         self._mode = "preview"
         self.setCursor(Qt.ArrowCursor)
         self.btn_clear.setVisible(True)
         self.title_label.setVisible(False)
-        self.subtitle_label.setVisible(False)
         self.loading_label.setVisible(False)
         self.progress.setVisible(False)
+        self.btn_cancel.setVisible(False)
         self.preview_label.setVisible(True)
         self._pixmap = pil_to_pixmap(pil_image)
         self._update_scaled_preview()
@@ -502,6 +706,7 @@ class SingleCutPage(QWidget):
         self.current_prediction: dict | None = None
         self.current_thread: QThread | None = None
         self.current_worker: SingleCutWorker | None = None
+        self.cancel_requested = False
         self.output_dir = SINGLE_OUTPUT_DIR
 
         self.btn_back = QPushButton("← Trang chủ")
@@ -514,6 +719,11 @@ class SingleCutPage(QWidget):
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setStyleSheet("font-size: 14px; color: #444444;")
 
+        self.instruction_label = QLabel("Kéo-thả ảnh vào đây hoặc bấm vào khung để chọn ảnh.")
+        self.instruction_label.setAlignment(Qt.AlignCenter)
+        self.instruction_label.setWordWrap(True)
+        self.instruction_label.setStyleSheet("font-size: 14px; color: #333333;")
+
         self.path_label = QLabel(f"Đường dẫn lưu: {self.output_dir}")
         self.path_label.setAlignment(Qt.AlignCenter)
         self.path_label.setWordWrap(True)
@@ -525,10 +735,7 @@ class SingleCutPage(QWidget):
         top.addWidget(self.title)
         top.addStretch(2)
 
-        self.canvas = UploadPreviewCanvas(
-            "Upload ảnh",
-            "Kéo-thả ảnh vào đây hoặc bấm vào khung để chọn ảnh.",
-        )
+        self.canvas = UploadPreviewCanvas("Upload ảnh")
 
         self.btn_save = QPushButton("Lưu ảnh")
         self.btn_config = QPushButton("Đường dẫn lưu")
@@ -554,6 +761,7 @@ class SingleCutPage(QWidget):
         layout.addLayout(top)
         layout.addWidget(self.status_label)
         layout.addWidget(self.path_label)
+        layout.addWidget(self.instruction_label)
         layout.addWidget(self.canvas, stretch=1)
         layout.addLayout(buttons)
         self.setLayout(layout)
@@ -562,10 +770,18 @@ class SingleCutPage(QWidget):
         self.canvas.clicked.connect(self.select_image)
         self.canvas.filesDropped.connect(self.handle_drop)
         self.canvas.clearRequested.connect(self.clear_current_preview)
+        self.canvas.cancelRequested.connect(self.cancel_current_cut)
         self.btn_save.clicked.connect(self.save_current)
         self.btn_config.clicked.connect(self.choose_output_dir)
         self.btn_open_output.clicked.connect(lambda: self.open_folder(self.output_dir))
         self.btn_edit.clicked.connect(self.edit_placeholder)
+
+    def set_busy_buttons(self, busy: bool):
+        self.btn_back.setEnabled(not busy)
+        self.btn_save.setEnabled(False if busy else self.current_prediction is not None)
+        self.btn_edit.setEnabled(False if busy else self.current_prediction is not None)
+        self.btn_config.setEnabled(not busy)
+        self.btn_open_output.setEnabled(not busy)
 
     def select_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -590,9 +806,9 @@ class SingleCutPage(QWidget):
             QMessageBox.critical(self, "Model chưa sẵn sàng", "Pipeline chưa load xong.")
             return
 
+        self.cancel_requested = False
         self.current_prediction = None
-        self.btn_save.setEnabled(False)
-        self.btn_edit.setEnabled(False)
+        self.set_busy_buttons(True)
         self.canvas.set_loading_mode("Đang cắt ảnh bằng F2_A1 → ViTMatte M6...")
         self.status_label.setText(f"Đang xử lý: {Path(image_path).name}")
 
@@ -602,18 +818,30 @@ class SingleCutPage(QWidget):
 
         self.current_thread.started.connect(self.current_worker.run)
         self.current_worker.finished.connect(self.on_cut_finished)
+        self.current_worker.canceled.connect(self.on_cut_canceled)
         self.current_worker.error.connect(self.on_worker_error)
 
         self.current_worker.finished.connect(self.current_thread.quit)
+        self.current_worker.canceled.connect(self.current_thread.quit)
         self.current_worker.error.connect(self.current_thread.quit)
         self.current_thread.finished.connect(self.current_thread.deleteLater)
 
         self.current_thread.start()
 
+    def cancel_current_cut(self):
+        self.cancel_requested = True
+        if self.current_worker is not None:
+            self.current_worker.cancel()
+        self.canvas.set_cancel_waiting_mode("Đang hủy thao tác cắt...")
+        self.status_label.setText("Đã yêu cầu dừng. App sẽ bỏ kết quả khi tác vụ hiện tại trả về.")
+
     def on_cut_finished(self, prediction: dict):
+        if self.cancel_requested:
+            self.on_cut_canceled()
+            return
+
         self.current_prediction = prediction
-        self.btn_save.setEnabled(True)
-        self.btn_edit.setEnabled(True)
+        self.set_busy_buttons(False)
 
         self.canvas.set_preview_pil(
             prediction["preview_checker_pil"],
@@ -624,17 +852,26 @@ class SingleCutPage(QWidget):
             f"Ảnh: {Path(prediction['input_path']).name}"
         )
 
-    def on_worker_error(self, err: str):
+    def on_cut_canceled(self):
+        self.cancel_requested = False
+        self.current_prediction = None
+        self.current_worker = None
+        self.set_busy_buttons(False)
         self.canvas.set_upload_mode()
-        self.btn_save.setEnabled(False)
-        self.btn_edit.setEnabled(False)
+        self.status_label.setText("Đã dừng cắt. Bạn có thể upload ảnh khác.")
+
+    def on_worker_error(self, err: str):
+        self.cancel_requested = False
+        self.current_worker = None
+        self.canvas.set_upload_mode()
+        self.current_prediction = None
+        self.set_busy_buttons(False)
         QMessageBox.critical(self, "Lỗi", err)
         self.status_label.setText("Có lỗi xảy ra khi cắt ảnh.")
 
     def clear_current_preview(self):
         self.current_prediction = None
-        self.btn_save.setEnabled(False)
-        self.btn_edit.setEnabled(False)
+        self.set_busy_buttons(False)
         self.canvas.set_upload_mode()
         self.status_label.setText("Đã xóa preview. Bạn có thể upload ảnh khác.")
 
@@ -687,6 +924,7 @@ class BatchCutPage(QWidget):
         self.cut_worker: BatchCutWorker | None = None
         self.save_thread: QThread | None = None
         self.save_worker: BatchSaveWorker | None = None
+        self.cancel_requested = False
 
         self.btn_back = QPushButton("← Trang chủ")
         apply_button_style(self.btn_back)
@@ -697,6 +935,11 @@ class BatchCutPage(QWidget):
         self.status_label = QLabel("Upload nhiều ảnh, kéo-thả ảnh/folder, hoặc chọn cắt cả folder.")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setStyleSheet("font-size: 14px; color: #444444;")
+
+        self.instruction_label = QLabel("Kéo-thả nhiều ảnh/folder vào đây hoặc bấm vào khung để chọn nhiều ảnh.")
+        self.instruction_label.setAlignment(Qt.AlignCenter)
+        self.instruction_label.setWordWrap(True)
+        self.instruction_label.setStyleSheet("font-size: 14px; color: #333333;")
 
         self.path_label = QLabel(f"Đường dẫn lưu: {self.output_dir}")
         self.path_label.setAlignment(Qt.AlignCenter)
@@ -709,10 +952,7 @@ class BatchCutPage(QWidget):
         top.addWidget(self.title)
         top.addStretch(2)
 
-        self.canvas = UploadPreviewCanvas(
-            "Upload ảnh",
-            "Kéo-thả nhiều ảnh/folder vào đây hoặc bấm vào khung để chọn nhiều ảnh.",
-        )
+        self.canvas = UploadPreviewCanvas("Upload ảnh")
 
         self.btn_save_all = QPushButton("Lưu ảnh")
         self.btn_select_folder = QPushButton("Cắt cả folder")
@@ -737,6 +977,7 @@ class BatchCutPage(QWidget):
         layout.addLayout(top)
         layout.addWidget(self.status_label)
         layout.addWidget(self.path_label)
+        layout.addWidget(self.instruction_label)
         layout.addWidget(self.canvas, stretch=1)
         layout.addLayout(buttons)
         self.setLayout(layout)
@@ -745,10 +986,35 @@ class BatchCutPage(QWidget):
         self.canvas.clicked.connect(self.select_images)
         self.canvas.filesDropped.connect(self.handle_drop)
         self.canvas.clearRequested.connect(self.clear_current_preview)
+        self.canvas.cancelRequested.connect(self.cancel_current_batch)
         self.btn_select_folder.clicked.connect(self.select_folder)
         self.btn_save_all.clicked.connect(self.save_all)
         self.btn_config.clicked.connect(self.choose_output_dir)
         self.btn_open_output.clicked.connect(lambda: self.open_folder(self.output_dir))
+
+    def set_busy_buttons(self, busy: bool):
+        self.btn_back.setEnabled(not busy)
+        self.btn_save_all.setEnabled(False if busy else len(self.predictions) > 0)
+        self.btn_select_folder.setEnabled(not busy)
+        self.btn_config.setEnabled(not busy)
+        self.btn_open_output.setEnabled(not busy)
+
+    def validate_batch_paths(self, image_paths: list[str], source_label: str = "batch") -> list[str] | None:
+        if not image_paths:
+            QMessageBox.warning(self, "Không có ảnh", "Không tìm thấy file ảnh hợp lệ.")
+            return None
+
+        if len(image_paths) > MAX_BATCH_IMAGES:
+            QMessageBox.warning(
+                self,
+                "Quá nhiều ảnh",
+                f"{source_label} có {len(image_paths)} ảnh. "
+                f"App hiện giới hạn tối đa {MAX_BATCH_IMAGES} ảnh/lần.",
+            )
+            return None
+
+        return image_paths
+
 
     def select_images(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -757,8 +1023,14 @@ class BatchCutPage(QWidget):
             "",
             "Images (*.png *.jpg *.jpeg *.webp *.bmp)",
         )
-        if paths:
-            self.start_batch(paths)
+        if not paths:
+            return
+
+        image_paths = self.validate_batch_paths(paths, "Bạn đã chọn")
+        if image_paths is None:
+            return
+
+        self.start_batch(image_paths)
 
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Chọn folder ảnh")
@@ -766,17 +1038,39 @@ class BatchCutPage(QWidget):
             return
 
         image_paths = collect_image_files_from_paths([folder], recursive=True)
-        if not image_paths:
-            QMessageBox.warning(self, "Không có ảnh", "Folder này không có ảnh hợp lệ.")
+        image_paths = self.validate_batch_paths(image_paths, "Folder này")
+        if image_paths is None:
             return
 
+        folder_name = Path(folder).name or folder
+        confirm_box = QMessageBox(self)
+        confirm_box.setWindowTitle("Xác nhận cắt folder")
+        confirm_box.setIcon(QMessageBox.Question)
+        confirm_box.setText(f'Xác nhận cắt folder "{folder_name}"?')
+        confirm_box.setInformativeText(
+            f"Tìm thấy {len(image_paths)} ảnh hợp lệ. App sẽ bắt đầu cắt sau khi bạn xác nhận."
+        )
+        btn_confirm = confirm_box.addButton("Xác nhận", QMessageBox.AcceptRole)
+        confirm_box.addButton("Hủy", QMessageBox.RejectRole)
+        confirm_box.exec()
+
+        if confirm_box.clickedButton() is not btn_confirm:
+            self.status_label.setText("Đã hủy cắt folder.")
+            return
+
+        self.predictions = []
+        self.selected_paths = []
+        self.btn_save_all.setEnabled(False)
+        self.canvas.set_upload_mode()
+        self.status_label.setText(f"Đã xác nhận folder: {folder} | {len(image_paths)} ảnh.")
         self.start_batch(image_paths)
 
     def handle_drop(self, paths: list[str]):
         image_paths = collect_image_files_from_paths(paths, recursive=True)
-        if not image_paths:
-            QMessageBox.warning(self, "Không có ảnh", "Không tìm thấy file ảnh hợp lệ.")
+        image_paths = self.validate_batch_paths(image_paths, "Dữ liệu kéo-thả")
+        if image_paths is None:
             return
+
         self.start_batch(image_paths)
 
     def start_batch(self, image_paths: list[str]):
@@ -785,10 +1079,10 @@ class BatchCutPage(QWidget):
             QMessageBox.critical(self, "Model chưa sẵn sàng", "Pipeline chưa load xong.")
             return
 
+        self.cancel_requested = False
         self.selected_paths = image_paths
         self.predictions = []
-        self.btn_save_all.setEnabled(False)
-        self.btn_select_folder.setEnabled(False)
+        self.set_busy_buttons(True)
         self.canvas.set_loading_mode(f"Đang cắt {len(image_paths)} ảnh...", 0, len(image_paths))
         self.status_label.setText(f"Đang tự động cắt {len(image_paths)} ảnh...")
 
@@ -799,22 +1093,34 @@ class BatchCutPage(QWidget):
         self.cut_thread.started.connect(self.cut_worker.run)
         self.cut_worker.progress.connect(self.on_cut_progress)
         self.cut_worker.finished.connect(self.on_batch_cut_finished)
+        self.cut_worker.canceled.connect(self.on_batch_cut_canceled)
         self.cut_worker.error.connect(self.on_worker_error)
 
         self.cut_worker.finished.connect(self.cut_thread.quit)
+        self.cut_worker.canceled.connect(self.cut_thread.quit)
         self.cut_worker.error.connect(self.cut_thread.quit)
         self.cut_thread.finished.connect(self.cut_thread.deleteLater)
 
         self.cut_thread.start()
+
+    def cancel_current_batch(self):
+        self.cancel_requested = True
+        if self.cut_worker is not None:
+            self.cut_worker.cancel()
+        self.canvas.set_cancel_waiting_mode("Đang hủy batch...")
+        self.status_label.setText("Đã yêu cầu dừng batch. App sẽ dừng sau ảnh đang xử lý.")
 
     def on_cut_progress(self, current: int, total: int, message: str):
         self.canvas.set_loading_mode(message, current, total)
         self.status_label.setText(f"{message} ({current}/{total})")
 
     def on_batch_cut_finished(self, predictions: list[dict]):
+        if self.cancel_requested:
+            self.on_batch_cut_canceled()
+            return
+
         self.predictions = predictions
-        self.btn_select_folder.setEnabled(True)
-        self.btn_save_all.setEnabled(len(predictions) > 0)
+        self.set_busy_buttons(False)
 
         if predictions:
             first = predictions[0]
@@ -829,17 +1135,29 @@ class BatchCutPage(QWidget):
             f"Cắt xong {len(predictions)} ảnh. Preview đang hiển thị ảnh đầu tiên. Chưa lưu."
         )
 
-    def on_worker_error(self, err: str):
+    def on_batch_cut_canceled(self):
+        self.cancel_requested = False
+        self.cut_worker = None
+        self.selected_paths = []
+        self.predictions = []
+        self.set_busy_buttons(False)
         self.canvas.set_upload_mode()
-        self.btn_select_folder.setEnabled(True)
-        self.btn_save_all.setEnabled(False)
+        self.status_label.setText("Đã dừng batch. Bạn có thể upload lại.")
+
+    def on_worker_error(self, err: str):
+        self.cancel_requested = False
+        self.cut_worker = None
+        self.canvas.set_upload_mode()
+        self.selected_paths = []
+        self.predictions = []
+        self.set_busy_buttons(False)
         QMessageBox.critical(self, "Lỗi", err)
         self.status_label.setText("Có lỗi xảy ra.")
 
     def clear_current_preview(self):
         self.selected_paths = []
         self.predictions = []
-        self.btn_save_all.setEnabled(False)
+        self.set_busy_buttons(False)
         self.canvas.set_upload_mode()
         self.status_label.setText("Đã xóa preview batch. Bạn có thể upload lại.")
 
@@ -853,7 +1171,16 @@ class BatchCutPage(QWidget):
 
         self.btn_save_all.setEnabled(False)
         self.btn_select_folder.setEnabled(False)
-        self.canvas.set_loading_mode(f"Đang lưu {len(self.predictions)} ảnh...", 0, len(self.predictions))
+        self.btn_config.setEnabled(False)
+        self.btn_open_output.setEnabled(False)
+        self.btn_back.setEnabled(False)
+
+        self.canvas.set_loading_mode(
+            f"Đang lưu {len(self.predictions)} ảnh...",
+            0,
+            len(self.predictions),
+            allow_cancel=False,
+        )
         self.status_label.setText("Đang lưu tất cả ảnh đã cắt...")
 
         self.save_thread = QThread()
@@ -877,11 +1204,14 @@ class BatchCutPage(QWidget):
         self.save_thread.start()
 
     def on_save_progress(self, current: int, total: int, message: str):
-        self.canvas.set_loading_mode(message, current, total)
+        self.canvas.set_loading_mode(message, current, total, allow_cancel=False)
         self.status_label.setText(f"{message} ({current}/{total})")
 
     def on_save_finished(self, log_path: str):
         self.btn_select_folder.setEnabled(True)
+        self.btn_config.setEnabled(True)
+        self.btn_open_output.setEnabled(True)
+        self.btn_back.setEnabled(True)
         self.btn_save_all.setEnabled(True)
 
         if self.predictions:
@@ -917,7 +1247,7 @@ class MainWindow(QWidget):
 
         self.engine: BgRemoveEngine | None = None
 
-        self.status_label = QLabel("Đang load pipeline F2_A1 → ViTMatte M6...")
+        self.status_label = QLabel(f"Đang load pipeline F2_A1 → ViTMatte M6... | Config: {get_config_path()}")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setStyleSheet("font-size: 13px; color: #555555;")
 
@@ -958,12 +1288,18 @@ class MainWindow(QWidget):
                 size=768,
             )
             self.status_label.setText(
-                f"Pipeline sẵn sàng: F2_A1 → M6 | Runtime: {self.engine.runtime_info}"
+                f"Pipeline sẵn sàng: F2_A1 → M6 | Runtime: {self.engine.runtime_info} | Config: {get_config_path()}"
             )
             self.set_pages_enabled(True)
         except Exception as e:
-            QMessageBox.critical(self, "Lỗi load model", str(e))
-            self.status_label.setText("Load pipeline thất bại.")
+            detail = (
+                f"{e}\n\n"
+                f"Config đang đọc:\n{get_config_path()}\n\n"
+                f"UNet ONNX path:\n{F2_A1_ONNX_PATH}\n\n"
+                f"ViTMatte ONNX path:\n{M6_ONNX_PATH}"
+            )
+            QMessageBox.critical(self, "Lỗi load model", detail)
+            self.status_label.setText("Load pipeline thất bại. Kiểm tra app_config.json cạnh exe/app.py.")
             self.set_pages_enabled(False)
 
 

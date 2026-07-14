@@ -1,0 +1,15 @@
+{
+  "_note": "Relative paths are resolved from the folder containing app.py or AniBGRmv.exe. On Windows, use forward slashes, example: D:/AniBGRmv/output/single_saved",
+  "model": {
+    "unet_onnx_path": "models/f3_unet_mit_b1_768.onnx",
+    "vitmatte_onnx_path": "models/m9_vitmatte_best_768.onnx"
+  },
+  "output": {
+    "single_output_dir": "output/single_saved",
+    "batch_output_dir": "output/batch_saved",
+    "save_debug_outputs": true
+  },
+  "batch": {
+    "max_batch_images": 30
+  }
+}

@@ -11,8 +11,8 @@ from bg_engine import BgRemoveEngine
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True, help="Path ảnh test")
-    parser.add_argument("--f2", default="models/f2a1_unet_mit_b1_768.onnx")
-    parser.add_argument("--m6", default="models/m6_vitmatte_m6_768.onnx")
+    parser.add_argument("--f2", default="models/f3_unet_mit_b1_768.onnx")
+    parser.add_argument("--m6", default="models/m9_vitmatte_best_768.onnx")
     parser.add_argument("--out", default="outputs/verify_onnx")
     parser.add_argument("--no_debug", action="store_true")
     args = parser.parse_args()
