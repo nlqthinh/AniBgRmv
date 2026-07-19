@@ -87,3 +87,4 @@ data/
 .ipynb_checkpoints/
 *.data
 /test_videos
+/ani_bgrmv/models
