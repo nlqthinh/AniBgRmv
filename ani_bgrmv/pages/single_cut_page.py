@@ -213,6 +213,9 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.canvas.filesDropped.connect(self.handle_drop)
         self.canvas.clearRequested.connect(self.clear_current_preview)
         self.canvas.cancelRequested.connect(self.cancel_current_cut)
+        # Two separate canvases share one preview-only background choice.
+        self.canvas.backgroundChanged.connect(self.edit_canvas.set_background_mode)
+        self.edit_canvas.backgroundChanged.connect(self.canvas.set_background_mode)
         self.btn_save.clicked.connect(self.save_current)
         self.btn_config.clicked.connect(self.choose_output_dir)
         self.btn_open_output.clicked.connect(lambda: self.open_folder(self.output_dir))
@@ -307,8 +310,8 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.current_prediction = prediction
         self.set_busy_buttons(False)
 
-        self.canvas.set_preview_pil(
-            prediction["preview_checker_pil"],
+        self.canvas.set_preview_cutout(
+            prediction["cutout_pil"],
             caption=Path(prediction["input_path"]).name,
         )
         self.status_label.setText(

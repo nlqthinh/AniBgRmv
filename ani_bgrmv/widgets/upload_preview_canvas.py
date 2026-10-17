@@ -1,8 +1,10 @@
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QProgressBar, QVBoxLayout, QHBoxLayout
 
 from ..styles import CANCEL_BUTTON_STYLE, DANGER_BUTTON_STYLE
 from ..utils import pil_to_pixmap
+from .background_swatches import BackgroundSwatches, BACKGROUND_COLORS, SWATCH_SIZE, paint_checker
 
 class UploadPreviewCanvas(QFrame):
     """
@@ -18,6 +20,7 @@ class UploadPreviewCanvas(QFrame):
     filesDropped = Signal(list)
     clearRequested = Signal()
     cancelRequested = Signal()
+    backgroundChanged = Signal(str)
 
     def __init__(self, title: str):
         super().__init__()
@@ -26,6 +29,8 @@ class UploadPreviewCanvas(QFrame):
         self.setMinimumHeight(360)
         self._mode = "upload"
         self._pixmap: QPixmap | None = None
+        self._is_rgba_cutout = False
+        self._background_mode = "transparent"
 
         self.setStyleSheet(
             """
@@ -47,10 +52,17 @@ class UploadPreviewCanvas(QFrame):
 
         self.btn_clear = QPushButton("X")
         self.btn_clear.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.btn_clear.setFixedSize(SWATCH_SIZE, SWATCH_SIZE)
         self.btn_clear.setVisible(False)
         self.btn_clear.clicked.connect(self.clearRequested.emit)
 
+        self.background_swatches = BackgroundSwatches(self)
+        self.background_swatches.setVisible(False)
+        self.background_swatches.backgroundChanged.connect(self.set_background_mode)
+
         clear_row = QHBoxLayout()
+        clear_row.setSpacing(6)
+        clear_row.addWidget(self.background_swatches)
         clear_row.addStretch(1)
         clear_row.addWidget(self.btn_clear)
 
@@ -109,8 +121,10 @@ class UploadPreviewCanvas(QFrame):
     def set_upload_mode(self):
         self._mode = "upload"
         self._pixmap = None
+        self._is_rgba_cutout = False
         self.setCursor(Qt.PointingHandCursor)
         self.btn_clear.setVisible(False)
+        self.background_swatches.setVisible(False)
         self.title_label.setVisible(True)
         self.loading_label.setVisible(False)
         self.progress.setVisible(False)
@@ -130,6 +144,7 @@ class UploadPreviewCanvas(QFrame):
         self._mode = "loading"
         self.setCursor(Qt.ArrowCursor)
         self.btn_clear.setVisible(False)
+        self.background_swatches.setVisible(False)
         self.title_label.setVisible(False)
         self.preview_label.setVisible(False)
         self.loading_label.setVisible(True)
@@ -151,6 +166,8 @@ class UploadPreviewCanvas(QFrame):
         self._mode = "preview"
         self.setCursor(Qt.ArrowCursor)
         self.btn_clear.setVisible(True)
+        self.background_swatches.setVisible(True)
+        self._is_rgba_cutout = False
         self.title_label.setVisible(False)
         self.loading_label.setVisible(False)
         self.progress.setVisible(False)
@@ -161,13 +178,53 @@ class UploadPreviewCanvas(QFrame):
         if caption:
             self.preview_label.setToolTip(caption)
 
+    def set_preview_cutout(self, cutout_pil, caption: str = ""):
+        """Display the real RGBA cutout with a selectable *visual-only* backing."""
+        self._mode = "preview"
+        self.setCursor(Qt.ArrowCursor)
+        self.btn_clear.setVisible(True)
+        self.background_swatches.setVisible(True)
+        self.title_label.setVisible(False)
+        self.loading_label.setVisible(False)
+        self.progress.setVisible(False)
+        self.btn_cancel.setVisible(False)
+        self.preview_label.setVisible(True)
+        self._pixmap = pil_to_pixmap(cutout_pil)  # retains original alpha
+        self._is_rgba_cutout = True
+        self._update_scaled_preview()
+        self.preview_label.setToolTip(caption)
+
+    def set_background_mode(self, mode: str):
+        if mode == self._background_mode:
+            return
+        self.background_swatches.set_mode(mode)
+        self._background_mode = mode
+        self._update_scaled_preview()
+        self.backgroundChanged.emit(mode)
+
     def _update_scaled_preview(self):
         if self._pixmap is None:
             return
         max_w = max(100, self.width() - 60)
         max_h = max(100, self.height() - 90)
         scaled = self._pixmap.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.preview_label.setPixmap(scaled)
+        if not self._is_rgba_cutout:
+            self.preview_label.setPixmap(scaled)
+            return
+
+        # Compose at screen resolution to keep buttons responsive on big images.
+        # The original RGBA pixmap is never modified; saving uses prediction['cutout_pil'].
+        display = QPixmap(scaled.size())
+        display.fill(Qt.transparent)
+        painter = QPainter(display)
+        rect = display.rect()
+        if self._background_mode == "transparent":
+            paint_checker(painter, rect)
+        else:
+            painter.fillRect(rect, QColor(*BACKGROUND_COLORS[self._background_mode]))
+        painter.drawPixmap(0, 0, scaled)
+        painter.end()
+        self.preview_label.setPixmap(display)
 
     def resizeEvent(self, event):
         self._update_scaled_preview()

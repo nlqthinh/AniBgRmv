@@ -71,7 +71,7 @@ class SingleEditControllerMixin:
         self.btn_back.setEnabled(True)
         self.instruction_label.setText("Kéo-thả ảnh vào đây hoặc bấm vào khung để chọn ảnh.")
         if self.current_prediction:
-            self.canvas.set_preview_pil(self.current_prediction["preview_checker_pil"])
+            self.canvas.set_preview_cutout(self.current_prediction["cutout_pil"])
             self.btn_save.setEnabled(True)
             self.btn_edit.setEnabled(True)
         self.refresh_single_layout()
@@ -135,16 +135,53 @@ class SingleEditControllerMixin:
         else:
             self.status_label.setText("Tiếp tục Edit.")
 
+    def preserve_inference_debug(self, edited: dict, previous: dict) -> dict:
+        """Preserve diagnostics from the actual F3 -> ViTMatte inference.
+
+        Edit/SAM changes the final alpha, NOT the original model predictions.
+        build_prediction_from_alpha() synthesizes intermediate arrays only to
+        support editing; they must not replace genuine debug intermediates.
+        """
+        inference_keys = (
+            "f2_alpha_768",
+            "f3_raw_output_letterbox_debug",
+            "f3_auto_alpha_before_fix_768",
+            "unet_alpha_original",
+            "unet_alpha_final_768",
+            "f3_letterbox_meta",
+            "image_letterbox_pil",
+            "valid_mask_768",
+            "trimap_768",
+            "m6_alpha_768",
+            "m6_raw_alpha_768",
+            "trimap_stats",
+            "trimap_stats_valid",
+            "alpha_fix_stats",
+            "vitmatte_edge_stats",
+        )
+        for key in inference_keys:
+            if key in previous:
+                edited[key] = previous[key]
+
+        # Keep edit-specific notes as well as the underlying inference notes.
+        notes = list(previous.get("safety_notes") or [])
+        for note in edited.get("safety_notes") or []:
+            if note not in notes:
+                notes.append(note)
+        edited["safety_notes"] = notes
+        return edited
+
     def clone_prediction_with_alpha(self, prediction: dict, alpha: np.ndarray) -> dict:
         engine = self.engine_getter()
         if engine is None:
             return dict(prediction)
-        return engine.build_prediction_from_alpha(
+        edited = engine.build_prediction_from_alpha(
             image_path=prediction["input_path"],
             final_alpha=np.asarray(alpha).astype(np.uint8),
             elapsed_sec=prediction.get("elapsed_sec", 0.0),
             source="ui_edit_clone",
         )
+        return self.preserve_inference_debug(edited, prediction)
 
     def refresh_edit_canvas(self):
         if not self.current_prediction:
@@ -381,6 +418,10 @@ class SingleEditControllerMixin:
             self.status_label.setText("SAM đã trả kết quả sau khi bị dừng, app đã bỏ qua kết quả đó.")
             return
 
+        # SAM returns a newly built prediction; restore the original inference
+        # debug fields while keeping SAM's edited cutout/final alpha unchanged.
+        if self.current_prediction is not None:
+            prediction = self.preserve_inference_debug(prediction, self.current_prediction)
         self.current_prediction = prediction
         self.edit_dirty = True
         self.edit_canvas.set_processing(False)

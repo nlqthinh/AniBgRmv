@@ -233,8 +233,8 @@ class BatchCutPage(QWidget):
 
         if predictions:
             first = predictions[0]
-            self.canvas.set_preview_pil(
-                first["preview_checker_pil"],
+            self.canvas.set_preview_cutout(
+                first["cutout_pil"],
                 caption=f"Preview ảnh đầu tiên: {Path(first['input_path']).name}",
             )
         else:
@@ -325,8 +325,8 @@ class BatchCutPage(QWidget):
 
         if self.predictions:
             first = self.predictions[0]
-            self.canvas.set_preview_pil(
-                first["preview_checker_pil"],
+            self.canvas.set_preview_cutout(
+                first["cutout_pil"],
                 caption=f"Preview ảnh đầu tiên: {Path(first['input_path']).name}",
             )
 

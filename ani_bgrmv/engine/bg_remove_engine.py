@@ -699,7 +699,10 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
 
         elapsed = time.time() - start
 
+        # Keep every intermediate from predict_alpha for both Single and
+        # Batch debug saving (including optional F3 raw/before-fix outputs).
         return {
+            **pred,
             "input_path": image_path,
             "final_alpha": pred["final_alpha"],
             "f2_alpha_768": pred["f2_alpha_768"],

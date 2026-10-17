@@ -7,11 +7,13 @@ from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QSizePolicy
 from ..utils import pil_to_pixmap
+from .background_swatches import BackgroundSwatches, BACKGROUND_COLORS
 
 class EditMaskCanvas(QFrame):
     strokeStarted = Signal()
     strokePoint = Signal(float, float)
     strokeFinished = Signal(list)
+    backgroundChanged = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -44,6 +46,14 @@ class EditMaskCanvas(QFrame):
         self.last_pan_pos = None
         self.stroke_points: list[tuple[float, float]] = []
         self.processing = False
+        self._background_mode = "transparent"
+        # A floating, clickable row, anchored at the same top-left offset as
+        # the normal preview's swatches. Always visible while Edit is open.
+        self.background_swatches = BackgroundSwatches(self)
+        self.background_swatches.move(18, 14)
+        self.background_swatches.adjustSize()
+        self.background_swatches.raise_()
+        self.background_swatches.backgroundChanged.connect(self.set_background_mode)
 
         # M22 performance cache: do not rebuild PIL/QPixmap on every paint event.
         self._preview_cache: QPixmap | None = None
@@ -80,6 +90,15 @@ class EditMaskCanvas(QFrame):
         self.alpha = arr.copy() if copy else arr
         self.invalidate_preview_cache()
         self.update()
+
+    def set_background_mode(self, mode: str):
+        if mode == self._background_mode:
+            return
+        self.background_swatches.set_mode(mode)
+        self._background_mode = mode
+        self.invalidate_preview_cache()
+        self.update()
+        self.backgroundChanged.emit(mode)
 
     def set_operation(self, operation: str):
         self.operation = operation
@@ -147,12 +166,22 @@ class EditMaskCanvas(QFrame):
         rgb = self.image_rgb.astype(np.float32)
         a = (self.alpha.astype(np.float32) / 255.0)[..., None]
 
-        # Erase mode: background/cut area looks strongly white.
-        # Restore mode: background is less white so missing parts can be seen.
-        bg_visibility = 0.12 if self.operation == "erase" else 0.48
-        visible = a + (1.0 - a) * bg_visibility
-        white = np.full_like(rgb, 255.0)
-        out = rgb * visible + white * (1.0 - visible)
+        if self._background_mode == "transparent":
+            # Checkerboard represents transparent PNG, without changing alpha.
+            h, w = self.alpha.shape[:2]
+            rows = np.arange(h)[:, None] // 24
+            cols = np.arange(w)[None, :] // 24
+            gray = np.where((rows + cols) % 2 == 0, 220, 255).astype(np.float32)
+            bg = gray[..., None]  # broadcast grayscale to 3 RGB channels
+        else:
+            bg = np.array(BACKGROUND_COLORS[self._background_mode], dtype=np.float32)
+
+        # Restore needs a faint view of the original, including deleted pixels,
+        # so users can paint missing parts back in. In Erase the selected backing
+        # is exact and shows the actual cutout (no white/fake alpha pixels).
+        ghost = 0.48 if self.operation == "restore" else 0.0
+        visible = a + (1.0 - a) * ghost
+        out = rgb * visible + bg * (1.0 - visible)
         return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
 
     def _preview_pixmap(self) -> QPixmap:
@@ -204,7 +233,7 @@ class EditMaskCanvas(QFrame):
 
         mode_text = "ERASE" if self.operation == "erase" else "RESTORE"
         painter.setPen(QColor("black"))
-        painter.drawText(18, 28, f"{mode_text} | zoom {self.zoom:.2f}x | brush {self.brush_size}px")
+        painter.drawText(18, 75, f"{mode_text} | zoom {self.zoom:.2f}x | brush {self.brush_size}px")
 
         if self.processing:
             painter.fillRect(self.rect(), QColor(255, 255, 255, 70))

@@ -87,6 +87,25 @@ class SavePredictionMixin:
 
         debug_root = output_dir / "99_debug"
 
+        # Single and Batch both call this method. Create the full shared debug
+        # layout, even if an optional intermediate is unavailable in an edited
+        # prediction. Never fabricate an image for a missing intermediate.
+        debug_subfolders = (
+            "01_final_alpha_used_for_cutout",
+            "02_f3_raw_output_letterbox_768_debug",
+            "03_f3_auto_alpha_before_fix_letterbox_768",
+            "04_f3_auto_alpha_used_for_trimap_letterbox_768",
+            "05_f3_auto_alpha_original_preview",
+            "06_m7_loose_trimap_letterbox_768",
+            "07_vitmatte_m7_raw_alpha_letterbox_768",
+            "08_vitmatte_m7_alpha_used_letterbox_768",
+            "09_valid_mask_letterbox_768",
+            "10_image_letterbox_768",
+            "11_final_alpha_letterbox_768_before_crop",
+        )
+        for subfolder in debug_subfolders:
+            (debug_root / subfolder).mkdir(parents=True, exist_ok=True)
+
         saved["final_alpha_path"] = self._write_debug_png(
             debug_root / "01_final_alpha_used_for_cutout",
             f"{stem}_final_alpha_used_for_cutout.png",
