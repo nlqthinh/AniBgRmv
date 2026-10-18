@@ -29,6 +29,7 @@ DEFAULT_APP_CONFIG = {
     "batch": {
         "max_batch_images": 30,
     },
+    "compute": {"mode": "cpu", "gpu_id": None, "gpu_name": None},
 }
 
 

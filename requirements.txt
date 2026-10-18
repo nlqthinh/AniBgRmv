@@ -1,7 +1,21 @@
-pyside6
-pillow
+# AniBgRmv (M35) — Windows x64, Python 3.13, NVIDIA CUDA 12.8 + cuDNN 9
+# PyTorch wheels from the official CUDA 12.8 PyTorch index.
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+# Existing app dependencies (preserved from AniBgRmv.zip).
+PySide6
+Pillow
 opencv-python
 numpy
 pandas
-onnxruntime
 pyinstaller
+
+# Required GPU stack. CUDA-qualified pins prevent accidentally using CPU wheels.
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+onnxruntime-gpu==1.26.0
+
+# Segment Anything import used by Edit/SAM.
+segment-anything==1.0
+
+# DO NOT add "onnxruntime" (CPU package) here: it conflicts with onnxruntime-gpu.

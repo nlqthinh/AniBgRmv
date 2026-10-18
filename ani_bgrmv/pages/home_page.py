@@ -6,6 +6,7 @@ from ..styles import apply_button_style
 class HomePage(QWidget):
     singleRequested = Signal()
     batchRequested = Signal()
+    computeRequested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -22,8 +23,9 @@ class HomePage(QWidget):
         self.btn_batch = QPushButton("Cắt nhiều hình")
         self.btn_video = QPushButton("Cắt video (sau)")
         self.btn_object = QPushButton("Xóa vật thể (sau)")
+        self.btn_compute = QPushButton("Trạng thái CPU/GPU")
 
-        for btn in [self.btn_single, self.btn_batch, self.btn_video, self.btn_object]:
+        for btn in [self.btn_single, self.btn_batch, self.btn_video, self.btn_object, self.btn_compute]:
             btn.setMinimumWidth(260)
             apply_button_style(btn)
 
@@ -36,6 +38,7 @@ class HomePage(QWidget):
         box.addWidget(self.btn_batch, alignment=Qt.AlignCenter)
         box.addWidget(self.btn_video, alignment=Qt.AlignCenter)
         box.addWidget(self.btn_object, alignment=Qt.AlignCenter)
+        box.addWidget(self.btn_compute, alignment=Qt.AlignCenter)
 
         outer = QVBoxLayout()
         outer.addStretch(1)
@@ -49,4 +52,5 @@ class HomePage(QWidget):
 
         self.btn_single.clicked.connect(self.singleRequested.emit)
         self.btn_batch.clicked.connect(self.batchRequested.emit)
+        self.btn_compute.clicked.connect(self.computeRequested.emit)
 

@@ -35,6 +35,7 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         size: int = 768,
         providers: list[str] | None = None,
         enforce_trimap_known_regions: bool = False,
+        compute_selection: dict | None = None,
     ):
         self.size = int(size)
         self.enforce_trimap_known_regions = enforce_trimap_known_regions
@@ -47,15 +48,80 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         if not self.m6_model_path.exists():
             raise FileNotFoundError(f"Không tìm thấy ViTMatte/M7 ONNX: {self.m6_model_path}")
 
-        self.providers = providers or self._default_providers()
+        # Explicit CPU by default, rather than automatically preferring a GPU.
+        # Strict GPU mode validates PyTorch/SAM CUDA *and* both ONNX sessions.
+        from ..device_management import normalized_selection, cuda_index, verify_gpu_for_sam
 
-        self.f2_sess = ort.InferenceSession(str(self.f2a1_model_path), providers=self.providers)
-        self.m6_sess = ort.InferenceSession(str(self.m6_model_path), providers=self.providers)
+        self.compute_selection = normalized_selection(compute_selection)
+        self.compute_mode = self.compute_selection["mode"]
+        self.sam_device = "cpu"
+        self.strict_gpu = self.compute_mode == "gpu"
+        session_options = ort.SessionOptions()
+        if self.strict_gpu:
+            index, gpu_name = verify_gpu_for_sam(self.compute_selection)
+            self.sam_device = f"cuda:{index}"
+            if "CUDAExecutionProvider" not in ort.get_available_providers():
+                raise RuntimeError(
+                    f"ONNX Runtime {ort.__version__} không có CUDAExecutionProvider "
+                    f"(providers={ort.get_available_providers()}). "
+                    "Có thể đang cài gói onnxruntime bản CPU. "
+                    "Cần onnxruntime-gpu phù hợp CUDA/cuDNN và cùng Python "
+                    "với app; chạy 'python tools/diagnose_gpu.py'. "
+                    "Không dùng CPU fallback."
+                )
+            # Importing torch above usually preloads CUDA/cuDNN from its wheel.
+            # ORT >= 1.21 also provides an explicit Windows DLL preloader.
+            # See https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html
+            if hasattr(ort, "preload_dlls"):
+                try:
+                    ort.preload_dlls()
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Không nạp được CUDA/cuDNN DLL cho ONNX Runtime GPU: "
+                        f"{exc}. Kiểm tra phiên bản PyTorch CUDA và "
+                        "onnxruntime-gpu có cùng CUDA/cuDNN major version. "
+                        "Không dùng CPU fallback."
+                    ) from exc
+            if providers is not None:
+                raise ValueError("Không được override ONNX providers ở chế độ GPU bắt buộc.")
+            self.providers = [("CUDAExecutionProvider", {"device_id": str(index)})]
+            # ORT must fail instead of silently assigning unsupported nodes to CPU.
+            session_options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+        else:
+            self.providers = ["CPUExecutionProvider"]
+            if "CPUExecutionProvider" not in ort.get_available_providers():
+                raise RuntimeError("ONNX Runtime không có CPUExecutionProvider.")
+
+        try:
+            self.f2_sess = ort.InferenceSession(
+                str(self.f2a1_model_path), sess_options=session_options, providers=self.providers
+            )
+            self.m6_sess = ort.InferenceSession(
+                str(self.m6_model_path), sess_options=session_options, providers=self.providers
+            )
+        except Exception as exc:
+            if self.strict_gpu:
+                raise RuntimeError(
+                    f"F3/ViTMatte không khởi tạo được CUDAExecutionProvider: {exc}. "
+                    "Kiểm tra DLL CUDA/cuDNN tương thích và VRAM còn trống. "
+                    "Không chuyển sang CPU."
+                ) from exc
+            raise
+        if self.strict_gpu:
+            for name, session in (("F3", self.f2_sess), ("ViTMatte", self.m6_sess)):
+                if not session.get_providers() or session.get_providers()[0] != "CUDAExecutionProvider":
+                    raise RuntimeError(f"{name} không chạy bằng CUDAExecutionProvider trên {gpu_name}. Không chuyển sang CPU.")
+                session.disable_fallback()
+        else:
+            for session in (self.f2_sess, self.m6_sess):
+                if session.get_providers() != ["CPUExecutionProvider"]:
+                    raise RuntimeError("CPU mode chỉ được chạy CPUExecutionProvider.")
+        self.runtime_info = (f"GPU {gpu_name} (cuda:{index}) — F3/M7: CUDA, SAM: CUDA"
+                             if self.strict_gpu else "CPU — F3/M7/SAM: CPU")
 
         self.f2_input_name = self.f2_sess.get_inputs()[0].name
         self.m6_input_name = self.m6_sess.get_inputs()[0].name
 
-        self.runtime_info = " / ".join(self.f2_sess.get_providers())
 
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -86,10 +152,9 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         return Path.cwd() / p
 
     def _default_providers(self) -> list[str]:
-        available = ort.get_available_providers()
-        preferred = ["CUDAExecutionProvider", "DmlExecutionProvider", "CPUExecutionProvider"]
-        selected = [p for p in preferred if p in available]
-        return selected or available
+        # Kept for compatibility with callers. The engine now chooses an
+        # explicit provider inside __init__ based on the saved compute mode.
+        return ["CPUExecutionProvider"]
 
     def _array_stats(self, x: np.ndarray, valid_mask: np.ndarray | None = None) -> dict:
         values = np.asarray(x, dtype=np.float32)

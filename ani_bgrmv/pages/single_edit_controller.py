@@ -356,7 +356,7 @@ class SingleEditControllerMixin:
             operation=self.edit_operation,
             sam_checkpoint_path=SAM_CHECKPOINT_PATH,
             sam_model_type=SAM_MODEL_TYPE,
-            sam_device=SAM_DEVICE,
+            sam_device=getattr(engine, "sam_device", "cpu"),
         )
         self.edit_worker.moveToThread(self.edit_thread)
 

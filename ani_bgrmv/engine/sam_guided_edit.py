@@ -37,8 +37,17 @@ class SamGuidedEditMixin:
                 "pip install git+https://github.com/facebookresearch/segment-anything.git"
             ) from e
 
-        if device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+        # The engine owns the device decision; never honor an old "auto" SAM
+        # config or silently use cuda:0/CPU when another adapter was chosen.
+        forced_device = getattr(self, "sam_device", None)
+        if forced_device is not None:
+            device = forced_device
+        elif device == "auto":
+            device = "cpu"
+        if device.startswith("cuda:"):
+            index = int(device.split(":", 1)[1])
+            if not torch.cuda.is_available() or index >= torch.cuda.device_count():
+                raise RuntimeError(f"SAM không thể chạy trên GPU {device}. Không chuyển sang CPU.")
 
         key = (str(checkpoint.resolve()), model_type, device)
         if key in self._sam_cache:
