@@ -174,12 +174,16 @@ class BatchSaveWorker(QObject):
                 logs.append(saved)
                 self.progress.emit(idx, total, f"Đã lưu: {Path(pred['input_path']).name}")
 
-            out_dir = Path(self.output_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            log_path = out_dir / "batch_log.csv"
-            pd.DataFrame(logs).to_csv(log_path, index=False, encoding="utf-8-sig")
-
-            self.finished.emit(str(log_path))
+            if self.save_debug:
+                # Keep the original batch report when debugging.
+                out_dir = Path(self.output_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                log_path = out_dir / "batch_log.csv"
+                pd.DataFrame(logs).to_csv(log_path, index=False, encoding="utf-8-sig")
+                self.finished.emit(str(log_path))
+            else:
+                # Release-like save: PNG cutouts only; no batch_log.csv.
+                self.finished.emit(str(Path(self.output_dir) / "01_cutouts"))
         except Exception:
             self.error.emit(traceback.format_exc())
 

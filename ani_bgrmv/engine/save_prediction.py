@@ -56,23 +56,15 @@ class SavePredictionMixin:
         stem = input_path.stem
 
         cutout_dir = output_dir / "01_cutouts"
-        preview_checker_dir = output_dir / "02_preview_checker"
-        preview_white_dir = output_dir / "03_preview_white"
-
         cutout_path = self._unique_path(cutout_dir, f"{stem}_cutout.png")
-        preview_checker_path = self._unique_path(preview_checker_dir, f"{stem}_preview_checker.jpg")
-        preview_white_path = self._unique_path(preview_white_dir, f"{stem}_preview_white.jpg")
-
         cutout_optimized = self.optimize_cutout_png(prediction["cutout_pil"])
         cutout_optimized.save(cutout_path, format="PNG", optimize=True, compress_level=9)
-        prediction["preview_checker_pil"].save(preview_checker_path, quality=95, optimize=True)
-        prediction["preview_white_pil"].save(preview_white_path, quality=95, optimize=True)
 
+        # With Debug OFF, do not create preview/debug folders or write any
+        # intermediate files. Leave existing files from older saves untouched.
         saved = {
             "input_path": str(input_path),
             "cutout_path": str(cutout_path),
-            "preview_checker_path": str(preview_checker_path),
-            "preview_white_path": str(preview_white_path),
             "elapsed_sec": prediction.get("elapsed_sec", None),
             "trimap_stats": prediction.get("trimap_stats", {}),
             "alpha_fix_stats": prediction.get("alpha_fix_stats", {}),
@@ -84,6 +76,16 @@ class SavePredictionMixin:
 
         if not save_debug:
             return saved
+
+        # Debug ON retains the previous saving behavior.
+        preview_checker_dir = output_dir / "02_preview_checker"
+        preview_white_dir = output_dir / "03_preview_white"
+        preview_checker_path = self._unique_path(preview_checker_dir, f"{stem}_preview_checker.jpg")
+        preview_white_path = self._unique_path(preview_white_dir, f"{stem}_preview_white.jpg")
+        prediction["preview_checker_pil"].save(preview_checker_path, quality=95, optimize=True)
+        prediction["preview_white_pil"].save(preview_white_path, quality=95, optimize=True)
+        saved["preview_checker_path"] = str(preview_checker_path)
+        saved["preview_white_path"] = str(preview_white_path)
 
         debug_root = output_dir / "99_debug"
 

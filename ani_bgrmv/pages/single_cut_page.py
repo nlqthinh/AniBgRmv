@@ -15,9 +15,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..app_config import SAVE_DEBUG_OUTPUTS, SINGLE_OUTPUT_DIR
+from ..app_config import SAVE_DEBUG_OUTPUTS, SHOW_DEBUG_BUTTON, SINGLE_OUTPUT_DIR
 from ..styles import (
     CANCEL_BUTTON_STYLE,
+    DEBUG_BUTTON_STYLE,
     EDIT_BLACK_BUTTON_STYLE,
     EDIT_ERASE_BUTTON_STYLE,
     EDIT_RESTORE_BUTTON_STYLE,
@@ -62,21 +63,21 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         apply_button_style(self.btn_back)
 
         self.title = QLabel("Cắt nền 1 hình")
-        self.title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        self.title.setStyleSheet("font-size: 22px; font-weight: 700; color: #FFFFFF;")
 
         self.status_label = QLabel("Upload hoặc kéo-thả ảnh vào khung chính.")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet("font-size: 14px; color: #444444;")
+        self.status_label.setStyleSheet("font-size: 14px; color: #FFFFFF;")
 
         self.instruction_label = QLabel("Kéo-thả ảnh vào đây hoặc bấm vào khung để chọn ảnh.")
         self.instruction_label.setAlignment(Qt.AlignCenter)
         self.instruction_label.setWordWrap(True)
-        self.instruction_label.setStyleSheet("font-size: 14px; color: #333333;")
+        self.instruction_label.setStyleSheet("font-size: 14px; color: #FFFFFF;")
 
         self.path_label = QLabel(f"Đường dẫn lưu: {self.output_dir}")
         self.path_label.setAlignment(Qt.AlignCenter)
         self.path_label.setWordWrap(True)
-        self.path_label.setStyleSheet("font-size: 12px; color: #666666;")
+        self.path_label.setStyleSheet("font-size: 12px; color: #F0F0F0;")
 
         top = QHBoxLayout()
         top.addWidget(self.btn_back)
@@ -135,6 +136,12 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.brush_panel_widget.setVisible(False)
 
         self.btn_save = QPushButton("Lưu ảnh")
+        self.btn_debug = QPushButton()
+        self.btn_debug.setCheckable(True)
+        self.btn_debug.setChecked(SAVE_DEBUG_OUTPUTS if SHOW_DEBUG_BUTTON else False)
+        self.btn_debug.setStyleSheet(DEBUG_BUTTON_STYLE)
+        if not SHOW_DEBUG_BUTTON:
+            self.btn_debug.hide()
         self.btn_config = QPushButton("Đường dẫn lưu")
         self.btn_edit = QPushButton("Edit")
         self.btn_open_output = QPushButton("Mở folder đã lưu")
@@ -149,6 +156,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
 
         self.normal_buttons_widget = QWidget()
         self.normal_buttons_widget.setLayout(center_button_row(
+            self.btn_debug,
             self.btn_save,
             self.btn_edit,
             self.btn_config,
@@ -157,10 +165,17 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
 
         self.edit_buttons_widget = QWidget()
         self.btn_erase = QPushButton("Erase")
+        self.btn_fit = QPushButton("Fit")
         self.btn_restore = QPushButton("Restore")
         self.btn_exit_edit = QPushButton("Exit")
         self.btn_brush_size = QPushButton("Brush size")
         self.btn_edit_save = QPushButton("Lưu ảnh")
+        self.btn_edit_debug = QPushButton()
+        self.btn_edit_debug.setCheckable(True)
+        self.btn_edit_debug.setChecked(self.btn_debug.isChecked())
+        self.btn_edit_debug.setStyleSheet(DEBUG_BUTTON_STYLE)
+        if not SHOW_DEBUG_BUTTON:
+            self.btn_edit_debug.hide()
         self.btn_stop_guided = QPushButton("Dừng")
         self.btn_stop_guided.setVisible(False)
 
@@ -170,26 +185,32 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
 
         self.btn_erase.setStyleSheet(EDIT_ERASE_BUTTON_STYLE)
         self.btn_restore.setStyleSheet(EDIT_RESTORE_BUTTON_STYLE)
-        for btn in [self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save]:
+        for btn in [self.btn_fit, self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save]:
             btn.setStyleSheet(EDIT_BLACK_BUTTON_STYLE)
         self.btn_stop_guided.setStyleSheet(CANCEL_BUTTON_STYLE)
         self.btn_edit_save.setStyleSheet(EDIT_BLACK_BUTTON_STYLE)
 
-        for btn, width in [(self.btn_erase, 104), (self.btn_restore, 112), (self.btn_exit_edit, 92), (self.btn_brush_size, 132), (self.btn_edit_save, 104), (self.btn_stop_guided, 104)]:
+        for btn, width in [(self.btn_erase, 88), (self.btn_fit, 64),
+                           (self.btn_restore, 98), (self.btn_exit_edit, 84),
+                           (self.btn_brush_size, 122), (self.btn_edit_save, 104),
+                           (self.btn_edit_debug, 112), (self.btn_stop_guided, 84)]:
             btn.setMinimumWidth(width)
             btn.setFixedHeight(42)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.edit_buttons_widget.setFixedHeight(58)
 
         edit_buttons_row = center_button_row(
+            self.btn_fit,
             self.btn_erase,
             self.btn_restore,
             self.btn_exit_edit,
             self.btn_brush_size,
+            self.btn_edit_debug,
             self.btn_edit_save,
             self.btn_stop_guided,
         )
         edit_buttons_row.setContentsMargins(0, 4, 0, 6)
+        edit_buttons_row.setSpacing(7)  # Fit added without squeezing bottom buttons
         self.edit_buttons_widget.setLayout(edit_buttons_row)
         self.edit_buttons_widget.setVisible(False)
 
@@ -217,11 +238,15 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.canvas.backgroundChanged.connect(self.edit_canvas.set_background_mode)
         self.edit_canvas.backgroundChanged.connect(self.canvas.set_background_mode)
         self.btn_save.clicked.connect(self.save_current)
+        self.btn_debug.toggled.connect(self.on_debug_toggled)
+        self.btn_edit_debug.toggled.connect(self.on_debug_toggled)
+        self.on_debug_toggled(self.btn_debug.isChecked())
         self.btn_config.clicked.connect(self.choose_output_dir)
         self.btn_open_output.clicked.connect(lambda: self.open_folder(self.output_dir))
         self.btn_edit.clicked.connect(self.enter_edit_mode)
 
         self.btn_erase.clicked.connect(lambda: self.set_edit_operation("erase"))
+        self.btn_fit.clicked.connect(self.edit_canvas.reset_view)
         self.btn_restore.clicked.connect(lambda: self.set_edit_operation("restore"))
         self.btn_guided.clicked.connect(lambda: self.set_edit_submode("guided"))
         self.btn_manual.clicked.connect(lambda: self.set_edit_submode("manual"))
@@ -242,6 +267,17 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.shortcut_undo.activated.connect(self.undo_edit)
         self.shortcut_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
         self.shortcut_redo.activated.connect(self.redo_edit)
+
+    def on_debug_toggled(self, enabled: bool):
+        # Keep the normal Save row and the SAM Edit Save row synchronized.
+        # Hidden buttons must never enable debug saving (release safety).
+        enabled = bool(enabled) and SHOW_DEBUG_BUTTON
+        for button in (self.btn_debug, self.btn_edit_debug):
+            if button.isChecked() != enabled:
+                button.blockSignals(True)
+                button.setChecked(enabled)
+                button.blockSignals(False)
+            button.setText("Debug: ON" if enabled else "Debug: OFF")
 
     def set_busy_buttons(self, busy: bool):
         self.btn_back.setEnabled(not busy)
@@ -355,7 +391,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         saved = engine.save_prediction(
             self.current_prediction,
             self.output_dir,
-            save_debug=SAVE_DEBUG_OUTPUTS,
+            save_debug=SHOW_DEBUG_BUTTON and self.btn_debug.isChecked(),
         )
 
         self.status_label.setText(f"Đã lưu: {saved['cutout_path']}")

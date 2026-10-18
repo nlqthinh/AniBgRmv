@@ -45,6 +45,8 @@ class SingleEditControllerMixin:
         self.btn_stop_guided.setVisible(False)
 
         self.edit_canvas.set_operation("erase")
+        self.edit_canvas.set_stroke_preview_enabled(True)
+        self._manual_last_point = None
         self.edit_canvas.set_brush_size(self.brush_slider.value())
         self.edit_canvas.reset_view()
         self.refresh_edit_canvas()
@@ -196,6 +198,7 @@ class SingleEditControllerMixin:
         self.btn_erase.setChecked(operation == "erase")
         self.btn_restore.setChecked(operation == "restore")
         self.edit_canvas.set_operation(operation)
+        self._manual_last_point = None
         if operation == "erase":
             self.status_label.setText("Erase: vùng nền sẽ trắng mạnh hơn để dễ thấy phần cần xóa.")
         else:
@@ -203,6 +206,8 @@ class SingleEditControllerMixin:
 
     def set_edit_submode(self, submode: str):
         self.edit_submode = submode
+        self._manual_last_point = None
+        self.edit_canvas.set_stroke_preview_enabled(submode == "guided")
         self.btn_guided.setChecked(submode == "guided")
         self.btn_manual.setChecked(submode == "manual")
         self.status_label.setText("Guided: SAM chọn vùng nhanh, không chạy ViTMatte mỗi nét để tránh lag." if submode == "guided" else "Manual: vẽ trực tiếp lên alpha, không chạy SAM.")
@@ -251,7 +256,14 @@ class SingleEditControllerMixin:
         if not self.current_prediction:
             return
         self.edit_stroke_active = True
-        self.push_undo_state()
+        self.push_undo_state()  # one full alpha snapshot per stroke, NOT per mouse event
+        self._manual_last_point = None
+        if self.edit_submode == "manual":
+            alpha = np.asarray(self.current_prediction["final_alpha"])
+            if not alpha.flags.writeable or not alpha.flags.c_contiguous:
+                alpha = np.ascontiguousarray(alpha).copy()
+                self.current_prediction["final_alpha"] = alpha
+            self.edit_canvas.set_alpha_reference(alpha)
 
     def on_edit_stroke_point(self, x: float, y: float):
         if self.edit_submode != "manual" or not self.current_prediction:
@@ -260,6 +272,7 @@ class SingleEditControllerMixin:
 
     def on_edit_stroke_finished(self, points: list):
         self.edit_stroke_active = False
+        self._manual_last_point = None
         if not self.current_prediction or not points:
             return
 
@@ -276,23 +289,39 @@ class SingleEditControllerMixin:
         self.start_guided_edit(points)
 
     def apply_manual_point_to_alpha(self, x: float, y: float):
+        """Paint a connected brush segment directly on alpha, not a full-image mask.
+
+        Earlier code allocated `np.zeros(alpha.shape)` and recomposited the entire
+        preview for *every* mouse event. At fast mouse speed this blocked Qt's event
+        loop and yielded isolated circular dabs. Connecting the previous point to
+        the latest event fills any samples that were skipped while Qt was busy.
+        """
         if not self.current_prediction:
             return
-        # M22: mutate current alpha in-place. The previous version copied the
-        # full alpha array on every mouse-move event, which made brush drawing lag.
         alpha = np.asarray(self.current_prediction["final_alpha"])
+        point = (int(round(x)), int(round(y)))
         radius = max(1, int(self.brush_slider.value() // 2))
-        mask = np.zeros(alpha.shape[:2], dtype=np.uint8)
-        cv2.circle(mask, (int(round(x)), int(round(y))), radius, 255, -1, lineType=cv2.LINE_AA)
-        if self.edit_operation == "erase":
-            alpha[mask > 0] = 0
+        color = 0 if self.edit_operation == "erase" else 255
+        previous = self._manual_last_point
+
+        if previous is None:
+            cv2.circle(alpha, point, radius, color, thickness=-1, lineType=cv2.LINE_8)
+            x0 = x1 = point[0]
+            y0 = y1 = point[1]
         else:
-            alpha[mask > 0] = 255
-        self.current_prediction["final_alpha"] = alpha
-        self.edit_canvas.set_alpha_array(alpha, copy=False)
+            # Connected segment, round endpoints from previous/current brush dabs.
+            cv2.line(alpha, previous, point, color, thickness=2 * radius,
+                     lineType=cv2.LINE_8)
+            cv2.circle(alpha, point, radius, color, thickness=-1, lineType=cv2.LINE_8)
+            x0, x1 = sorted((previous[0], point[0]))
+            y0, y1 = sorted((previous[1], point[1]))
+
+        self._manual_last_point = point
+        pad = radius + 2
+        self.edit_canvas.refresh_alpha_region(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
 
     def set_edit_controls_enabled(self, enabled: bool):
-        for btn in [self.btn_erase, self.btn_restore, self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save, self.btn_guided, self.btn_manual, self.btn_close_brush]:
+        for btn in [self.btn_erase, self.btn_fit, self.btn_restore, self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save, self.btn_guided, self.btn_manual, self.btn_close_brush]:
             btn.setEnabled(enabled)
         self.brush_slider.setEnabled(enabled)
         self.btn_stop_guided.setVisible(not enabled)

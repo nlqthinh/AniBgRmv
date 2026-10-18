@@ -53,7 +53,7 @@ class MainWindow(QWidget):
         self.status_label = QLabel(f"Đang khởi động... | Config: {get_config_path()}")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("font-size: 13px; color: #555555;")
+        self.status_label.setStyleSheet("font-size: 13px; color: #F0F0F0;")
 
         self.stack = QStackedWidget()
         self.home_page = HomePage()

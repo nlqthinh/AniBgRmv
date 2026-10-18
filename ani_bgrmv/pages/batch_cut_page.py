@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..app_config import BATCH_OUTPUT_DIR, MAX_BATCH_IMAGES, SAVE_DEBUG_OUTPUTS
-from ..styles import apply_button_style
+from ..app_config import BATCH_OUTPUT_DIR, MAX_BATCH_IMAGES, SAVE_DEBUG_OUTPUTS, SHOW_DEBUG_BUTTON
+from ..styles import DEBUG_BUTTON_STYLE, apply_button_style
 from ..utils import center_button_row, collect_image_files_from_paths
 from ..widgets.upload_preview_canvas import UploadPreviewCanvas
 from ..workers import BatchCutWorker, BatchSaveWorker
@@ -34,26 +34,27 @@ class BatchCutPage(QWidget):
         self.save_thread: QThread | None = None
         self.save_worker: BatchSaveWorker | None = None
         self.cancel_requested = False
+        self._save_debug_for_current_batch = False
 
         self.btn_back = QPushButton("← Trang chủ")
         apply_button_style(self.btn_back)
 
         self.title = QLabel("Cắt nhiều hình")
-        self.title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        self.title.setStyleSheet("font-size: 22px; font-weight: 700; color: #FFFFFF;")
 
         self.status_label = QLabel("Upload nhiều ảnh, kéo-thả ảnh/folder, hoặc chọn cắt cả folder.")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet("font-size: 14px; color: #444444;")
+        self.status_label.setStyleSheet("font-size: 14px; color: #FFFFFF;")
 
         self.instruction_label = QLabel("Kéo-thả nhiều ảnh/folder vào đây hoặc bấm vào khung để chọn nhiều ảnh.")
         self.instruction_label.setAlignment(Qt.AlignCenter)
         self.instruction_label.setWordWrap(True)
-        self.instruction_label.setStyleSheet("font-size: 14px; color: #333333;")
+        self.instruction_label.setStyleSheet("font-size: 14px; color: #FFFFFF;")
 
         self.path_label = QLabel(f"Đường dẫn lưu: {self.output_dir}")
         self.path_label.setAlignment(Qt.AlignCenter)
         self.path_label.setWordWrap(True)
-        self.path_label.setStyleSheet("font-size: 12px; color: #666666;")
+        self.path_label.setStyleSheet("font-size: 12px; color: #F0F0F0;")
 
         top = QHBoxLayout()
         top.addWidget(self.btn_back)
@@ -64,6 +65,13 @@ class BatchCutPage(QWidget):
         self.canvas = UploadPreviewCanvas("Upload ảnh")
 
         self.btn_save_all = QPushButton("Lưu ảnh")
+        self.btn_debug = QPushButton("Debug: ON" if SAVE_DEBUG_OUTPUTS else "Debug: OFF")
+        self.btn_debug.setCheckable(True)
+        self.btn_debug.setChecked(SAVE_DEBUG_OUTPUTS if SHOW_DEBUG_BUTTON else False)
+        self.btn_debug.setStyleSheet(DEBUG_BUTTON_STYLE)
+        if not SHOW_DEBUG_BUTTON:
+            self.btn_debug.hide()
+        self.btn_debug.setText("Debug: ON" if self.btn_debug.isChecked() else "Debug: OFF")
         self.btn_select_folder = QPushButton("Cắt cả folder")
         self.btn_config = QPushButton("Đường dẫn lưu")
         self.btn_open_output = QPushButton("Mở folder đã lưu")
@@ -76,6 +84,7 @@ class BatchCutPage(QWidget):
         self.btn_save_all.setEnabled(False)
 
         buttons = center_button_row(
+            self.btn_debug,
             self.btn_save_all,
             self.btn_select_folder,
             self.btn_config,
@@ -98,6 +107,9 @@ class BatchCutPage(QWidget):
         self.canvas.cancelRequested.connect(self.cancel_current_batch)
         self.btn_select_folder.clicked.connect(self.select_folder)
         self.btn_save_all.clicked.connect(self.save_all)
+        self.btn_debug.toggled.connect(
+            lambda checked: self.btn_debug.setText("Debug: ON" if checked else "Debug: OFF")
+        )
         self.btn_config.clicked.connect(self.choose_output_dir)
         self.btn_open_output.clicked.connect(lambda: self.open_folder(self.output_dir))
 
@@ -254,6 +266,7 @@ class BatchCutPage(QWidget):
         self.status_label.setText("Đã dừng batch. Bạn có thể upload lại.")
 
     def on_worker_error(self, err: str):
+        self.btn_debug.setEnabled(True)
         self.cancel_requested = False
         self.cut_worker = None
         self.canvas.set_upload_mode()
@@ -279,10 +292,12 @@ class BatchCutPage(QWidget):
             return
 
         self.btn_save_all.setEnabled(False)
+        self.btn_debug.setEnabled(False)
         self.btn_select_folder.setEnabled(False)
         self.btn_config.setEnabled(False)
         self.btn_open_output.setEnabled(False)
         self.btn_back.setEnabled(False)
+        self._save_debug_for_current_batch = SHOW_DEBUG_BUTTON and self.btn_debug.isChecked()
 
         self.canvas.set_loading_mode(
             f"Đang lưu {len(self.predictions)} ảnh...",
@@ -297,7 +312,7 @@ class BatchCutPage(QWidget):
             engine,
             self.predictions,
             self.output_dir,
-            save_debug=SAVE_DEBUG_OUTPUTS,
+            save_debug=self._save_debug_for_current_batch,
         )
         self.save_worker.moveToThread(self.save_thread)
 
@@ -316,7 +331,8 @@ class BatchCutPage(QWidget):
         self.canvas.set_loading_mode(message, current, total, allow_cancel=False)
         self.status_label.setText(f"{message} ({current}/{total})")
 
-    def on_save_finished(self, log_path: str):
+    def on_save_finished(self, saved_path: str):
+        self.btn_debug.setEnabled(True)
         self.btn_select_folder.setEnabled(True)
         self.btn_config.setEnabled(True)
         self.btn_open_output.setEnabled(True)
@@ -330,8 +346,12 @@ class BatchCutPage(QWidget):
                 caption=f"Preview ảnh đầu tiên: {Path(first['input_path']).name}",
             )
 
-        self.status_label.setText(f"Đã lưu batch. Log: {log_path}")
-        QMessageBox.information(self, "Batch đã lưu", f"Đã lưu batch.\nLog:\n{log_path}")
+        if self._save_debug_for_current_batch:
+            self.status_label.setText(f"Đã lưu batch. Log: {saved_path}")
+            QMessageBox.information(self, "Batch đã lưu", f"Đã lưu batch.\nLog:\n{saved_path}")
+        else:
+            self.status_label.setText(f"Đã lưu ảnh PNG tại: {saved_path}")
+            QMessageBox.information(self, "Batch đã lưu", f"Đã lưu ảnh PNG trong suốt tại:\n{saved_path}")
 
     def choose_output_dir(self):
         folder = QFileDialog.getExistingDirectory(self, "Chọn folder lưu ảnh", self.output_dir)

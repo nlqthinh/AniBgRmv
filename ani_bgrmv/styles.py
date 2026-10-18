@@ -113,6 +113,27 @@ QPushButton:disabled {
 EDIT_ERASE_BUTTON_STYLE = EDIT_BLACK_BUTTON_STYLE.replace("color: #FFFFFF;", "color: #FF3030;")
 EDIT_RESTORE_BUTTON_STYLE = EDIT_BLACK_BUTTON_STYLE.replace("color: #FFFFFF;", "color: #20D060;")
 
+DEBUG_BUTTON_STYLE = """
+QPushButton {
+    font-size: 14px;
+    font-weight: 700;
+    padding: 10px 14px;
+    min-height: 42px;
+    border-radius: 10px;
+    border: 1px solid #B8B8B8;
+    color: #444444;
+    background: #F1F1F1;
+}
+QPushButton:checked {
+    border: 1px solid #178A42;
+    color: #06451F;
+    background: #C4F2D1;
+}
+QPushButton:hover { border-color: #777777; }
+QPushButton:disabled { color: #888888; background: #EEEEEE; }
+"""
+
+
 def apply_button_style(button: QPushButton, primary: bool = False):
     button.setStyleSheet(PRIMARY_BUTTON_STYLE if primary else BUTTON_STYLE)
     button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)

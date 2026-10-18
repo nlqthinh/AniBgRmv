@@ -25,6 +25,7 @@ DEFAULT_APP_CONFIG = {
         "single_output_dir": "output/single_saved",
         "batch_output_dir": "output/batch_saved",
         "save_debug_outputs": True,
+        "show_debug_button": True,
     },
     "batch": {
         "max_batch_images": 30,
@@ -156,7 +157,11 @@ MAX_BATCH_IMAGES = int(APP_CONFIG["batch"]["max_batch_images"])
 SINGLE_OUTPUT_DIR = str(resolve_app_path(APP_CONFIG["output"]["single_output_dir"]))
 BATCH_OUTPUT_DIR = str(resolve_app_path(APP_CONFIG["output"]["batch_output_dir"]))
 
+# Development: show the Debug toggle and initially check it.
+# Release: set output.show_debug_button=false and
+# output.save_debug_outputs=false in ani_bgrmv/app_config.json.
 SAVE_DEBUG_OUTPUTS = bool(APP_CONFIG["output"]["save_debug_outputs"])
+SHOW_DEBUG_BUTTON = bool(APP_CONFIG["output"]["show_debug_button"])
 
 SAM_CHECKPOINT_PATH = str(resolve_app_path(APP_CONFIG["sam"]["checkpoint_path"]))
 SAM_MODEL_TYPE = str(APP_CONFIG["sam"].get("model_type", "vit_b"))

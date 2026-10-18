@@ -9,6 +9,14 @@ from PySide6.QtWidgets import QFrame, QSizePolicy
 from ..utils import pil_to_pixmap
 from .background_swatches import BackgroundSwatches, BACKGROUND_COLORS
 
+# M37 — chỉnh độ mờ của con trỏ ở đây (0 = trong suốt, 255 = đậm hoàn toàn).
+# Màu: ERASE_CURSOR_RGB / RESTORE_CURSOR_RGB là (đỏ, xanh lá).
+ERASE_CURSOR_RGB = (255, 0, 0)
+RESTORE_CURSOR_RGB = (0, 220, 75)
+BRUSH_CURSOR_OUTLINE_ALPHA = 75  # trước đây 170; nay mờ hơn một nửa
+BRUSH_CURSOR_FILL_ALPHA = 18     # trước đây 45; nay mờ hơn một nửa
+GUIDED_STROKE_ALPHA = 165       # nét SAM dùng để đánh dấu vùng chọn
+
 class EditMaskCanvas(QFrame):
     strokeStarted = Signal()
     strokePoint = Signal(float, float)
@@ -59,6 +67,7 @@ class EditMaskCanvas(QFrame):
         self._preview_cache: QPixmap | None = None
         self._hover_pos = None
         self._hover_inside = False
+        self._stroke_preview_enabled = True  # Guided: preview đường đi; Manual: xem alpha cập nhật thật
 
     def invalidate_preview_cache(self):
         self._preview_cache = None
@@ -75,6 +84,19 @@ class EditMaskCanvas(QFrame):
             )
         self.stroke_points = []
         self.invalidate_preview_cache()
+        self.update()
+
+    def set_alpha_reference(self, alpha: np.ndarray):
+        """Share the writable prediction-alpha during Manual stroke; keep the preview cache.
+
+        Don't invalidate the full preview for every mouse movement.  The controller
+        calls refresh_alpha_region() after changing only the brushed rectangle.
+        """
+        if self.image_rgb is not None:
+            self.alpha = alpha
+
+    def set_stroke_preview_enabled(self, enabled: bool):
+        self._stroke_preview_enabled = bool(enabled)
         self.update()
 
     def set_alpha_array(self, alpha: np.ndarray, copy: bool = False):
@@ -161,28 +183,54 @@ class EditMaskCanvas(QFrame):
         scale = self._base_scale() * self.zoom
         return rect.left() + x * scale, rect.top() + y * scale
 
-    def _render_preview(self) -> Image.Image:
+    def _render_preview_region(self, x0: int, y0: int, x1: int, y1: int) -> Image.Image:
+        """Composite a region in image coordinates, using the same preview backing.
+
+        Used for both full preview and incremental Manual brush updates.  The
+        checkerboard is anchored to image (0,0), so ROI patches match precisely.
+        """
         assert self.image_rgb is not None and self.alpha is not None
-        rgb = self.image_rgb.astype(np.float32)
-        a = (self.alpha.astype(np.float32) / 255.0)[..., None]
+        rgb = self.image_rgb[y0:y1, x0:x1].astype(np.float32)
+        a = (self.alpha[y0:y1, x0:x1].astype(np.float32) / 255.0)[..., None]
 
         if self._background_mode == "transparent":
-            # Checkerboard represents transparent PNG, without changing alpha.
-            h, w = self.alpha.shape[:2]
-            rows = np.arange(h)[:, None] // 24
-            cols = np.arange(w)[None, :] // 24
+            rows = np.arange(y0, y1)[:, None] // 24
+            cols = np.arange(x0, x1)[None, :] // 24
             gray = np.where((rows + cols) % 2 == 0, 220, 255).astype(np.float32)
-            bg = gray[..., None]  # broadcast grayscale to 3 RGB channels
+            bg = gray[..., None]
         else:
             bg = np.array(BACKGROUND_COLORS[self._background_mode], dtype=np.float32)
 
-        # Restore needs a faint view of the original, including deleted pixels,
-        # so users can paint missing parts back in. In Erase the selected backing
-        # is exact and shows the actual cutout (no white/fake alpha pixels).
         ghost = 0.48 if self.operation == "restore" else 0.0
         visible = a + (1.0 - a) * ghost
         out = rgb * visible + bg * (1.0 - visible)
         return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
+
+    def _render_preview(self) -> Image.Image:
+        assert self.image_rgb is not None
+        h, w = self.image_rgb.shape[:2]
+        return self._render_preview_region(0, 0, w, h)
+
+    def refresh_alpha_region(self, x0: int, y0: int, x1: int, y1: int):
+        """Update just the brushed ROI of the *cached* pixmap (no full-frame PIL conversion).
+
+        Bounding coordinates are inclusive. The alpha itself was modified in-place
+        by the controller; this method only changes the visible on-screen preview.
+        """
+        if self.alpha is None or self.image_rgb is None:
+            return
+        h, w = self.alpha.shape[:2]
+        left, top = max(0, int(x0)), max(0, int(y0))
+        right, bottom = min(w, int(x1) + 1), min(h, int(y1) + 1)
+        if right <= left or bottom <= top:
+            return
+        if self._preview_cache is not None:
+            patch = pil_to_pixmap(self._render_preview_region(left, top, right, bottom))
+            painter = QPainter(self._preview_cache)
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.drawPixmap(left, top, patch)
+            painter.end()
+        self.update()
 
     def _preview_pixmap(self) -> QPixmap:
         if self._preview_cache is None:
@@ -204,9 +252,10 @@ class EditMaskCanvas(QFrame):
         pix = self._preview_pixmap()
         painter.drawPixmap(rect, pix, QRectF(pix.rect()))
 
-        if self.stroke_points:
+        if self.stroke_points and self._stroke_preview_enabled:
             scale = self._base_scale() * self.zoom
-            pen = QPen(QColor(255, 0, 0, 210))
+            red, green, blue = ERASE_CURSOR_RGB if self.operation == "erase" else RESTORE_CURSOR_RGB
+            pen = QPen(QColor(red, green, blue, GUIDED_STROKE_ALPHA))
             pen.setWidth(max(1, int(self.brush_size * scale)))
             pen.setCapStyle(Qt.RoundCap)
             pen.setJoinStyle(Qt.RoundJoin)
@@ -221,14 +270,15 @@ class EditMaskCanvas(QFrame):
                     x2, y2 = self._image_to_widget(*p2)
                     painter.drawLine(int(x1), int(y1), int(x2), int(y2))
 
-        # Red translucent brush cursor.
+        # Brush cursor is translucent and follows the selected operation.
         if self._hover_inside and self._hover_pos is not None and not self.processing:
             point = self._widget_to_image(self._hover_pos.x(), self._hover_pos.y())
             if point is not None:
                 scale = self._base_scale() * self.zoom
                 r = max(2.0, (self.brush_size * scale) / 2.0)
-                painter.setPen(QPen(QColor(255, 0, 0, 170), 2))
-                painter.setBrush(QColor(255, 0, 0, 45))
+                red, green, blue = ERASE_CURSOR_RGB if self.operation == "erase" else RESTORE_CURSOR_RGB
+                painter.setPen(QPen(QColor(red, green, blue, BRUSH_CURSOR_OUTLINE_ALPHA), 2))
+                painter.setBrush(QColor(red, green, blue, BRUSH_CURSOR_FILL_ALPHA))
                 painter.drawEllipse(QRectF(self._hover_pos.x() - r, self._hover_pos.y() - r, r * 2, r * 2))
 
         mode_text = "ERASE" if self.operation == "erase" else "RESTORE"
