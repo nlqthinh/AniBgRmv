@@ -88,3 +88,5 @@ data/
 *.data
 /test_videos
 /ani_bgrmv/models
+/tests
+/bat

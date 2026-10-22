@@ -12,14 +12,16 @@ DEFAULT_APP_CONFIG = {
         "for example: D:/AniBGRmv/output/single_saved"
     ),
     "model": {
-        "unet_onnx_path": "models/f2a1_unet_mit_b1_768.onnx",
-        "vitmatte_onnx_path": "models/m6_vitmatte_m6_768.onnx",
+        "unet_onnx_path": "models/F3_A1_letterbox_constant_768_best.onnx",
+        "vitmatte_onnx_path": "models/m7_vitmatte_letterbox_best.onnx",
     },
     "sam": {
-        "checkpoint_path": "models/sam_vit_b_01ec64.pth",
+        "encoder_onnx_path": "models/sam_vit_b_encoder.onnx",
+        "decoder_onnx_path": "models/sam_vit_b_decoder.onnx",
         "model_type": "vit_b",
         "device": "auto",
         "guided_timeout_ms": 0,
+        "cpu_guided_backend": "grabcut",  # nhanh, chất lượng khác SAM; dùng SAM nếu đổi thành "sam"
     },
     "output": {
         "single_output_dir": "output/single_saved",
@@ -30,7 +32,7 @@ DEFAULT_APP_CONFIG = {
     "batch": {
         "max_batch_images": 30,
     },
-    "compute": {"mode": "cpu", "gpu_id": None, "gpu_name": None},
+    "compute": {"mode": "cpu", "gpu_id": None, "gpu_name": None, "cpu_threads": 2},
 }
 
 
@@ -163,7 +165,10 @@ BATCH_OUTPUT_DIR = str(resolve_app_path(APP_CONFIG["output"]["batch_output_dir"]
 SAVE_DEBUG_OUTPUTS = bool(APP_CONFIG["output"]["save_debug_outputs"])
 SHOW_DEBUG_BUTTON = bool(APP_CONFIG["output"]["show_debug_button"])
 
-SAM_CHECKPOINT_PATH = str(resolve_app_path(APP_CONFIG["sam"]["checkpoint_path"]))
+SAM_ENCODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["encoder_onnx_path"]))
+SAM_DECODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["decoder_onnx_path"]))
+# Kept for the existing GuidedEditWorker argument name; never points to .pth.
+SAM_CHECKPOINT_PATH = SAM_ENCODER_ONNX_PATH
 SAM_MODEL_TYPE = str(APP_CONFIG["sam"].get("model_type", "vit_b"))
 SAM_DEVICE = str(APP_CONFIG["sam"].get("device", "auto"))
 GUIDED_EDIT_TIMEOUT_MS = int(APP_CONFIG.get("sam", {}).get("guided_timeout_ms", 5000))

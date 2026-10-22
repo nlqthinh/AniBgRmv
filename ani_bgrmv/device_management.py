@@ -1,8 +1,7 @@
-"""Persisted compute selection and conservative GPU detection for strict mode.
+"""Persisted CPU/GPU selection; F3, M7 and both SAM graphs run on ONNX Runtime.
 
-GPU mode intentionally supports CUDA only. Standard PyTorch SAM cannot use a
-DirectML ONNX adapter; allowing DirectML here would silently split the models
-across devices, contradicting the strict single-GPU choice.
+Strict GPU (A) means NVIDIA CUDA and never fallback to CPU; AMD/Intel are
+visible in GPU Check but not supported by this release.
 """
 import json
 import os
@@ -17,6 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from .app_config import APP_CONFIG, get_external_config_path
+from .portable_device_settings import (build_variant, load_machine_selection, save_machine_selection)
 
 
 def normalized_selection(raw=None):
@@ -32,12 +32,16 @@ def normalized_selection(raw=None):
 
 
 def current_selection():
+    if getattr(sys, "frozen", False):
+        return normalized_selection(load_machine_selection())
     return normalized_selection(APP_CONFIG.get("compute", {}))
 
 
 def save_selection(selection):
     """Update only 'compute' in external JSON; preserve user paths/settings."""
     selection = normalized_selection(selection)
+    if getattr(sys, "frozen", False):
+        return normalized_selection(save_machine_selection(selection))
     path = get_external_config_path()
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     if not isinstance(data, dict):
@@ -53,80 +57,89 @@ def save_selection(selection):
 def cuda_index(selection):
     if selection["mode"] != "gpu":
         raise ValueError("Không ở chế độ GPU")
+    if build_variant() == "cpu":
+        raise RuntimeError("Đây là CPU Edition, không chứa CUDA. Cần GPU Edition để dùng NVIDIA.")
     match = re.fullmatch(r"cuda:(0|[1-9][0-9]*)", selection.get("gpu_id") or "")
     if match is None:
-        raise RuntimeError("GPU đã chọn chưa hỗ trợ chạy đồng thời ONNX CUDA và PyTorch SAM. Chọn GPU NVIDIA CUDA bằng GPU Check.")
+        raise RuntimeError("GPU đã chọn chưa hỗ trợ CUDA ONNX cho F3/M7/SAM. Chọn GPU NVIDIA bằng GPU Check.")
     return int(match.group(1))
 
 
+# Keep directory handles alive: Windows searches those for dependent CUDA DLLs.
+_CUDA_DLL_HANDLES = []
+
+
+def preload_cuda_runtime():
+    """Preload CUDA/cuDNN without importing torch in the frozen app."""
+    import onnxruntime as ort
+    # PyInstaller's gpu_runtime folder contains only selected CUDA DLLs, not torch.
+    root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    bundled = root / "gpu_runtime"
+    if os.name == 'nt' and bundled.is_dir():
+        _CUDA_DLL_HANDLES.append(os.add_dll_directory(str(bundled)))
+        if hasattr(ort, 'preload_dlls'):
+            ort.preload_dlls(directory=str(bundled))
+    elif hasattr(ort, 'preload_dlls'):
+        # Dev environment: use torch/lib DLLs if present, but NEVER import torch.
+        ort.preload_dlls()
+
+
 def verify_gpu_for_sam(selection):
-    """Fail closed before creating any CUDA ONNX session."""
+    """Check strict ONNX CUDA prerequisites, without importing PyTorch.
+
+    Model/session execution is checked separately by ONNX Runtime when loaded.
+    """
+    import onnxruntime as ort
     idx = cuda_index(selection)
-    try:
-        import torch
-    except ImportError as exc:
-        raise RuntimeError("Thiếu PyTorch có hỗ trợ CUDA; không thể chạy SAM trên GPU đã chọn.") from exc
-    # nvidia-smi/Windows only prove that a display adapter exists. They do
-    # NOT prove that this Python interpreter has CUDA-capable PyTorch installed.
-    compiled_cuda = getattr(torch.version, "cuda", None)
-    if not compiled_cuda:
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
         raise RuntimeError(
-            "Đã tìm thấy GPU NVIDIA qua Windows/nvidia-smi, nhưng PyTorch "
-            f"{torch.__version__} hiện là bản CPU-only (torch.version.cuda=None). "
-            "Hãy cài bản PyTorch CUDA vào đúng môi trường Python chạy app. "
-            "Chạy 'python tools/diagnose_gpu.py' để xem chi tiết. "
-            "Không chuyển sang CPU."
+            f"onnxruntime {ort.__version__} không có CUDAExecutionProvider. "
+            "Cần onnxruntime-gpu CUDA phù hợp; không fallback CPU."
         )
-    try:
-        available = bool(torch.cuda.is_available())
-        count = int(torch.cuda.device_count())
-    except Exception as exc:
+    from .app_config import SAM_ENCODER_ONNX_PATH, SAM_DECODER_ONNX_PATH
+    for label, path in (("SAM encoder", SAM_ENCODER_ONNX_PATH),
+                        ("SAM decoder", SAM_DECODER_ONNX_PATH)):
+        if not Path(path).is_file():
+            raise RuntimeError(f"Không tìm thấy {label}: {path}. Cần hai file SAM ONNX.")
+
+    # Respect strict same-GPU semantics: CUDA_VISIBLE_DEVICES can remap indices.
+    visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').strip()
+    if visible and visible != ','.join(str(i) for i in range(idx + 1)):
         raise RuntimeError(
-            f"PyTorch {torch.__version__} (CUDA build {compiled_cuda}) "
-            f"không khởi tạo được CUDA: {exc}. Kiểm tra NVIDIA driver, "
-            "CUDA_VISIBLE_DEVICES và chạy tools/diagnose_gpu.py. "
-            "Không chuyển sang CPU."
-        ) from exc
-    if not available or idx >= count:
-        raise RuntimeError(
-            f"GPU cuda:{idx} có trong nvidia-smi nhưng PyTorch "
-            f"{torch.__version__} (CUDA build {compiled_cuda}) "
-            f"chỉ thấy {count} CUDA device(s); is_available={available}. "
-            "Kiểm tra NVIDIA driver, CUDA_VISIBLE_DEVICES, khả năng hỗ trợ "
-            "GTX 1650 của PyTorch và đúng môi trường Python. "
-            "Chạy 'python tools/diagnose_gpu.py'. Không chuyển sang CPU."
+            f'CUDA_VISIBLE_DEVICES={visible!r} có thể đổi thứ tự GPU. '
+            'Hãy bỏ biến này và GPU Check lại để đảm bảo đúng GPU đã chọn.'
         )
+    # GPU Check uses nvidia-smi; cross-check the selection's name and index.
+    exe = shutil.which('nvidia-smi')
+    if not exe and os.name == 'nt':
+        candidate = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'NVIDIA Corporation/NVSMI/nvidia-smi.exe'
+        if candidate.exists():
+            exe = str(candidate)
+    if not exe:
+        raise RuntimeError('Không tìm thấy nvidia-smi để đối chiếu GPU. Không dùng CPU thay thế.')
+    flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     try:
-        device_name = torch.cuda.get_device_name(idx)
-    except Exception as exc:
-        raise RuntimeError(f"Không đọc được cuda:{idx} từ PyTorch: {exc}") from exc
-    expected = selection.get("gpu_name") or ""
-    # Names from WMI, nvidia-smi and PyTorch may have different vendor prefixes.
-    def core(s):
-        return re.sub(r"[^a-z0-9]", "", s.lower().replace("nvidia", "").replace("geforce", ""))
-    if expected and core(expected) not in core(device_name) and core(device_name) not in core(expected):
-        raise RuntimeError(f"GPU đã lưu ({expected}) khác GPU cuda:{idx} hiện tại ({device_name}). Hãy GPU Check lại.")
-    # Validate SAM dependencies *before enabling any GPU image-processing tasks*.
-    # The SAM weights themselves stay lazy-loaded (on first Guided Edit),
-    # avoiding a large, needless startup VRAM reservation.
-    from .app_config import SAM_CHECKPOINT_PATH, SAM_MODEL_TYPE
-    if not Path(SAM_CHECKPOINT_PATH).is_file():
-        raise RuntimeError(f"Chế độ GPU bắt buộc cần SAM checkpoint: {SAM_CHECKPOINT_PATH}")
-    try:
-        from segment_anything import sam_model_registry
-    except ImportError as exc:
-        raise RuntimeError("Thiếu segment_anything cho SAM; chế độ GPU không thể bật tất cả model.") from exc
-    if SAM_MODEL_TYPE not in sam_model_registry:
-        raise RuntimeError(f"SAM model_type không hợp lệ: {SAM_MODEL_TYPE}")
-    # This also tests a real CUDA allocation; it is not merely checking a driver name.
-    try:
-        # Synchronize to catch asynchronous kernel/init errors before accepting.
-        probe = torch.ones(16, device=f"cuda:{idx}")
-        torch.cuda.synchronize(idx)
-        del probe
-    except Exception as exc:
-        raise RuntimeError(f"Không thể thực thi phép toán CUDA trên GPU cuda:{idx}: {exc}") from exc
-    return idx, device_name
+        data = subprocess.check_output(
+            [exe, '--query-gpu=index,name', '--format=csv,noheader,nounits'],
+            timeout=15, creationflags=flags, text=True, errors='replace',
+        )
+        names = {}
+        for line in data.splitlines():
+            if ',' in line:
+                gpu_idx, name = line.split(',', 1)
+                names[int(gpu_idx.strip())] = name.strip()
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f'Không xác minh được NVIDIA CUDA bằng nvidia-smi: {exc}') from exc
+    if idx not in names:
+        raise RuntimeError(f'Không tìm thấy NVIDIA GPU {idx} trong nvidia-smi; hãy GPU Check lại.')
+    name = names[idx]
+    expected = selection.get('gpu_name') or ''
+    def core(value):
+        return re.sub(r'[^a-z0-9]', '', value.lower().replace('nvidia','').replace('geforce',''))
+    if expected and core(expected) not in core(name) and core(name) not in core(expected):
+        raise RuntimeError(f'GPU đã lưu ({expected}) không khớp NVIDIA GPU {idx} ({name}).')
+    preload_cuda_runtime()
+    return idx, name
 
 
 class GpuScanThread(QThread):
@@ -211,27 +224,8 @@ class GpuScanThread(QThread):
                 return devices
             except (ValueError, RuntimeError, TimeoutError):
                 pass
-        # For development installs without nvidia-smi, use torch in a child
-        # interpreter so Stop can actually terminate the probe.
-        if not getattr(sys, "frozen", False):
-            script = ("import json,torch; print(json.dumps([{'id':f'cuda:{i}',"
-                      "'name':torch.cuda.get_device_name(i),'compatible':True} "
-                      "for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else []))")
-            try:
-                raw = self._command([sys.executable, "-c", script], timeout=30)
-                return json.loads(raw.splitlines()[-1]) if raw else []
-            except (ValueError, RuntimeError, TimeoutError, IndexError):
-                pass
-        # A frozen EXE cannot launch sys.executable -c; probe torch in this
-        # background thread instead. Stop is observed immediately afterward.
-        if getattr(sys, "frozen", False) and not self._stop.is_set():
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    return [{"id": f"cuda:{i}", "name": torch.cuda.get_device_name(i), "compatible": True}
-                            for i in range(torch.cuda.device_count())]
-            except (ImportError, RuntimeError, OSError):
-                pass
+        # nvidia-smi is the authoritative CUDA index source here; avoid
+        # importing PyTorch just to enumerate devices (not shipped in EXE).
         return []
 
     def run(self):

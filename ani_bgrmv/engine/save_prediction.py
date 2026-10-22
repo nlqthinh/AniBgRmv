@@ -82,8 +82,16 @@ class SavePredictionMixin:
         preview_white_dir = output_dir / "03_preview_white"
         preview_checker_path = self._unique_path(preview_checker_dir, f"{stem}_preview_checker.jpg")
         preview_white_path = self._unique_path(preview_white_dir, f"{stem}_preview_white.jpg")
-        prediction["preview_checker_pil"].save(preview_checker_path, quality=95, optimize=True)
-        prediction["preview_white_pil"].save(preview_white_path, quality=95, optimize=True)
+        # Edited predictions are lightweight; compute the two debug-only
+        # previews on demand instead of keeping both RGB copies in RAM.
+        checker_preview = prediction.get('preview_checker_pil')
+        white_preview = prediction.get('preview_white_pil')
+        if checker_preview is None:
+            checker_preview = self.make_preview_checker(prediction['cutout_pil'])
+        if white_preview is None:
+            white_preview = self.make_preview_white(prediction['cutout_pil'])
+        checker_preview.save(preview_checker_path, quality=95, optimize=True)
+        white_preview.save(preview_white_path, quality=95, optimize=True)
         saved["preview_checker_path"] = str(preview_checker_path)
         saved["preview_white_path"] = str(preview_white_path)
 

@@ -38,6 +38,7 @@ class ModelLoadWorker(QObject):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
+        self.setObjectName("AniBgRmvMainWindow")
         self.setWindowTitle("Anime Background Remover - F3 → ViTMatte M7")
         screen_rect = QGuiApplication.primaryScreen().availableGeometry()
         start_w = min(1120, max(960, int(screen_rect.width() * 0.90)))
@@ -60,6 +61,11 @@ class MainWindow(QWidget):
         self.single_page = SingleCutPage(self.get_engine)
         self.batch_page = BatchCutPage(self.get_engine)
         self.compute_page = ComputeStatusPage()
+        # M49: stable page selectors for dark backgrounds, independent of OS theme.
+        self.home_page.setObjectName("AniBgRmvHomePage")
+        self.single_page.setObjectName("AniBgRmvSinglePage")
+        self.batch_page.setObjectName("AniBgRmvBatchPage")
+        self.compute_page.setObjectName("AniBgRmvComputePage")
 
         for page in (self.home_page, self.single_page, self.batch_page, self.compute_page):
             self.stack.addWidget(page)

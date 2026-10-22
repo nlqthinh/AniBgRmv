@@ -1,4 +1,6 @@
 import os
+from PIL import Image
+from ..disk_cache import new_batch_cache
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, Signal
@@ -35,6 +37,7 @@ class BatchCutPage(QWidget):
         self.save_worker: BatchSaveWorker | None = None
         self.cancel_requested = False
         self._save_debug_for_current_batch = False
+        self._batch_temp_cache = None
 
         self.btn_back = QPushButton("← Trang chủ")
         apply_button_style(self.btn_back)
@@ -100,7 +103,7 @@ class BatchCutPage(QWidget):
         layout.addLayout(buttons)
         self.setLayout(layout)
 
-        self.btn_back.clicked.connect(self.backRequested.emit)
+        self.btn_back.clicked.connect(self._on_back_clicked)
         self.canvas.clicked.connect(self.select_images)
         self.canvas.filesDropped.connect(self.handle_drop)
         self.canvas.clearRequested.connect(self.clear_current_preview)
@@ -194,12 +197,34 @@ class BatchCutPage(QWidget):
 
         self.start_batch(image_paths)
 
+    def _on_back_clicked(self):
+        # Returning Home should not leave batch PNGs occupying disk/RAM.
+        self._clear_batch_cache()
+        self.predictions = []
+        self.selected_paths = []
+        self.canvas.set_upload_mode()
+        self.backRequested.emit()
+
+    def _clear_batch_cache(self):
+        cache = self._batch_temp_cache
+        self._batch_temp_cache = None
+        if cache is not None:
+            cache.cleanup()
+
+    @staticmethod
+    def _preview_from_prediction(prediction: dict):
+        if 'cached_cutout_path' in prediction:
+            with Image.open(prediction['cached_cutout_path']) as image:
+                return image.convert('RGBA')
+        return prediction['cutout_pil']
+
     def start_batch(self, image_paths: list[str]):
         engine = self.engine_getter()
         if engine is None:
             QMessageBox.critical(self, "Model chưa sẵn sàng", "Pipeline chưa load xong.")
             return
 
+        self._clear_batch_cache()
         self.cancel_requested = False
         self.selected_paths = image_paths
         self.predictions = []
@@ -208,7 +233,16 @@ class BatchCutPage(QWidget):
         self.status_label.setText(f"Đang tự động cắt {len(image_paths)} ảnh...")
 
         self.cut_thread = QThread()
-        self.cut_worker = BatchCutWorker(engine, image_paths)
+        # In release mode the Debug button is hidden and OFF; avoid retaining
+        # unused alpha intermediates/preview JPGs for every batch image.
+        # Only Debug OFF uses disk-backed results. Debug ON retains complete
+        # inference intermediates required for the 99_debug output folders.
+        lite = not (SHOW_DEBUG_BUTTON and self.btn_debug.isChecked())
+        self._batch_temp_cache = new_batch_cache() if lite else None
+        self.cut_worker = BatchCutWorker(
+            engine, image_paths, lightweight=lite,
+            batch_cache_dir=(self._batch_temp_cache.name if lite else None),
+        )
         self.cut_worker.moveToThread(self.cut_thread)
 
         self.cut_thread.started.connect(self.cut_worker.run)
@@ -242,11 +276,13 @@ class BatchCutPage(QWidget):
 
         self.predictions = predictions
         self.set_busy_buttons(False)
+        if any('cached_cutout_path' in p for p in predictions):
+            self.btn_debug.setEnabled(False)  # Debug output was not retained
 
         if predictions:
             first = predictions[0]
             self.canvas.set_preview_cutout(
-                first["cutout_pil"],
+                self._preview_from_prediction(first),
                 caption=f"Preview ảnh đầu tiên: {Path(first['input_path']).name}",
             )
         else:
@@ -257,15 +293,18 @@ class BatchCutPage(QWidget):
         )
 
     def on_batch_cut_canceled(self):
+        self._clear_batch_cache()
         self.cancel_requested = False
         self.cut_worker = None
         self.selected_paths = []
         self.predictions = []
         self.set_busy_buttons(False)
+        self.btn_debug.setEnabled(True)
         self.canvas.set_upload_mode()
         self.status_label.setText("Đã dừng batch. Bạn có thể upload lại.")
 
     def on_worker_error(self, err: str):
+        self._clear_batch_cache()
         self.btn_debug.setEnabled(True)
         self.cancel_requested = False
         self.cut_worker = None
@@ -277,8 +316,10 @@ class BatchCutPage(QWidget):
         self.status_label.setText("Có lỗi xảy ra.")
 
     def clear_current_preview(self):
+        self._clear_batch_cache()
         self.selected_paths = []
         self.predictions = []
+        self.btn_debug.setEnabled(True)
         self.set_busy_buttons(False)
         self.canvas.set_upload_mode()
         self.status_label.setText("Đã xóa preview batch. Bạn có thể upload lại.")
@@ -297,7 +338,10 @@ class BatchCutPage(QWidget):
         self.btn_config.setEnabled(False)
         self.btn_open_output.setEnabled(False)
         self.btn_back.setEnabled(False)
-        self._save_debug_for_current_batch = SHOW_DEBUG_BUTTON and self.btn_debug.isChecked()
+        self._save_debug_for_current_batch = (
+            SHOW_DEBUG_BUTTON and self.btn_debug.isChecked()
+            and not any('cached_cutout_path' in p for p in self.predictions)
+        )
 
         self.canvas.set_loading_mode(
             f"Đang lưu {len(self.predictions)} ảnh...",
@@ -319,7 +363,7 @@ class BatchCutPage(QWidget):
         self.save_thread.started.connect(self.save_worker.run)
         self.save_worker.progress.connect(self.on_save_progress)
         self.save_worker.finished.connect(self.on_save_finished)
-        self.save_worker.error.connect(self.on_worker_error)
+        self.save_worker.error.connect(self.on_save_error)
 
         self.save_worker.finished.connect(self.save_thread.quit)
         self.save_worker.error.connect(self.save_thread.quit)
@@ -327,24 +371,42 @@ class BatchCutPage(QWidget):
 
         self.save_thread.start()
 
+    def on_save_error(self, err: str):
+        # Keep staged PNGs if output drive is full or a file cannot be written;
+        # the user can choose a different destination and retry Save.
+        self.btn_debug.setEnabled(not any('cached_cutout_path' in p for p in self.predictions))
+        self.btn_select_folder.setEnabled(True)
+        self.btn_config.setEnabled(True)
+        self.btn_open_output.setEnabled(True)
+        self.btn_back.setEnabled(True)
+        self.btn_save_all.setEnabled(bool(self.predictions))
+        if self.predictions:
+            first = self.predictions[0]
+            self.canvas.set_preview_cutout(self._preview_from_prediction(first),
+                                           caption='Preview ảnh đầu tiên')
+        QMessageBox.critical(self, 'Lỗi lưu ảnh', err)
+        self.status_label.setText('Lưu lỗi; kết quả vẫn được giữ để bạn thử lại.')
+
     def on_save_progress(self, current: int, total: int, message: str):
         self.canvas.set_loading_mode(message, current, total, allow_cancel=False)
         self.status_label.setText(f"{message} ({current}/{total})")
 
     def on_save_finished(self, saved_path: str):
+        # The final cutout files are copied; the staging cache is disposable.
+        # Preserve the first cutout for the UI before deleting cached PNGs.
+        first_cutout = self._preview_from_prediction(self.predictions[0]) if self.predictions else None
+        if self._batch_temp_cache is not None:
+            self._clear_batch_cache()
+            self.predictions = []  # manifests point to files that were removed
         self.btn_debug.setEnabled(True)
         self.btn_select_folder.setEnabled(True)
         self.btn_config.setEnabled(True)
         self.btn_open_output.setEnabled(True)
         self.btn_back.setEnabled(True)
-        self.btn_save_all.setEnabled(True)
+        self.btn_save_all.setEnabled(bool(self.predictions))
 
-        if self.predictions:
-            first = self.predictions[0]
-            self.canvas.set_preview_cutout(
-                first["cutout_pil"],
-                caption=f"Preview ảnh đầu tiên: {Path(first['input_path']).name}",
-            )
+        if first_cutout is not None:
+            self.canvas.set_preview_cutout(first_cutout, caption='Preview ảnh đã lưu')
 
         if self._save_debug_for_current_batch:
             self.status_label.setText(f"Đã lưu batch. Log: {saved_path}")

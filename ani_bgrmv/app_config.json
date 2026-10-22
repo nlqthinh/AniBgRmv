@@ -5,11 +5,12 @@
     "vitmatte_onnx_path": "models/m7_vitmatte_letterbox_best.onnx"
   },
   "sam": {
-    "checkpoint_path": "models/sam_vit_b_01ec64.pth",
-    "model_type": "vit_b",
-    "device": "auto",
-    "guided_timeout_ms": 0
-  },
+  "encoder_onnx_path": "models/sam_vit_b_encoder.onnx",
+  "decoder_onnx_path": "models/sam_vit_b_decoder.onnx",
+  "model_type": "vit_b",
+  "device": "auto",
+  "guided_timeout_ms": 0
+  } ,
   "output": {
     "single_output_dir": "output/single_saved",
     "batch_output_dir": "output/batch_saved",

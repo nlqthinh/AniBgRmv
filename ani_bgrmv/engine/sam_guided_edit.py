@@ -13,56 +13,103 @@ class SamGuidedEditMixin:
         model_type: str = "vit_b",
         device: str = "auto",
     ):
+        """Lazy-load SAM ONNX encoder/decoder when Guided Edit is first used.
+
+        The public parameter name sam_checkpoint_path is preserved for the
+        unchanged UI/worker API; it now points to sam.encoder_onnx_path.
         """
-        Lazy-load SAM only when Guided Edit is used.
-        This keeps normal auto-cut startup unchanged.
-        """
+        from ..app_config import SAM_DECODER_ONNX_PATH
+        from .sam_onnx_runtime import SamOnnxPredictor
+
+        if model_type != "vit_b":
+            raise RuntimeError('Bản ONNX này hỗ trợ SAM vit_b. Hãy export model vit_b tương ứng.')
         if not hasattr(self, "_sam_cache"):
             self._sam_cache = {}
-
-        checkpoint = self._resolve_asset_path(sam_checkpoint_path)
-        if not checkpoint.exists():
-            raise FileNotFoundError(
-                f"Không tìm thấy SAM checkpoint: {checkpoint}\n"
-                "Hãy tải sam_vit_b_01ec64.pth hoặc sửa app_config.json mục sam.checkpoint_path."
-            )
-
-        try:
-            import torch
-            from segment_anything import sam_model_registry, SamPredictor
-        except ImportError as e:
-            raise ImportError(
-                "Thiếu package SAM. Cài bằng:\n"
-                "pip install torch torchvision\n"
-                "pip install git+https://github.com/facebookresearch/segment-anything.git"
-            ) from e
-
-        # The engine owns the device decision; never honor an old "auto" SAM
-        # config or silently use cuda:0/CPU when another adapter was chosen.
+        encoder = self._resolve_asset_path(sam_checkpoint_path)
+        decoder = self._resolve_asset_path(SAM_DECODER_ONNX_PATH)
+        for path in (encoder, decoder):
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f'Không tìm thấy SAM ONNX: {path}. '
+                    'Hãy export đủ sam_vit_b_encoder.onnx và sam_vit_b_decoder.onnx.'
+                )
         forced_device = getattr(self, "sam_device", None)
         if forced_device is not None:
             device = forced_device
         elif device == "auto":
             device = "cpu"
-        if device.startswith("cuda:"):
-            index = int(device.split(":", 1)[1])
-            if not torch.cuda.is_available() or index >= torch.cuda.device_count():
-                raise RuntimeError(f"SAM không thể chạy trên GPU {device}. Không chuyển sang CPU.")
+        key = (str(encoder.resolve()), str(decoder.resolve()), model_type, device)
+        if key not in self._sam_cache:
+            self._sam_cache[key] = SamOnnxPredictor(encoder, decoder, device)
+            self._sam_current_image_key = None
+        return self._sam_cache[key]
 
-        key = (str(checkpoint.resolve()), model_type, device)
-        if key in self._sam_cache:
-            return self._sam_cache[key]
+    def release_sam_resources(self):
+        """Called on leaving Edit, never during an active Guided worker.
 
-        if model_type not in sam_model_registry:
-            raise ValueError("model_type SAM không hợp lệ. Hãy dùng vit_b, vit_l hoặc vit_h.")
+        ONNX Runtime keeps CUDA/CPU memory arenas as long as sessions live.
+        Unloading SAM here preserves F3/ViTMatte and frees the large encoder
+        sessions. SAM is lazy-loaded again on next Edit.
+        """
+        import gc
+        cache = getattr(self, '_sam_cache', {})
+        for predictor in cache.values():
+            try:
+                predictor.close()
+            except Exception:
+                pass
+        cache.clear()
+        self._sam_current_image_key = None
+        gc.collect()  # only at transition out of Edit; not during brush strokes
 
-        sam = sam_model_registry[model_type](checkpoint=str(checkpoint))
-        sam.to(device=device)
-        sam.eval()
-        predictor = SamPredictor(sam)
+    @staticmethod
+    def _cpu_grabcut_mask(image_rgb, brush_mask, box_xyxy):
+        """Fast approximate Guided selector for CPU-only/weak-PC builds.
 
-        self._sam_cache[key] = predictor
-        return predictor
+        GrabCut learns foreground/background colors inside a small ROI. It is
+        *not* SAM and can produce different shapes; the brush itself is always
+        included by the caller. It never infers on the full 1024x1024 ViT.
+        """
+        x1, y1, x2, y2 = (int(v) for v in box_xyxy)
+        roi = np.ascontiguousarray(image_rgb[y1:y2+1, x1:x2+1], dtype=np.uint8)
+        strokes = np.asarray(brush_mask[y1:y2+1, x1:x2+1], dtype=np.uint8)
+        h, w = roi.shape[:2]
+        output = np.zeros(brush_mask.shape, dtype=bool)
+        if min(h, w) < 8 or not strokes.any():
+            output[y1:y2+1, x1:x2+1] = strokes.astype(bool)
+            return output
+        # Use definite FG only where the user brushed; probable FG in a
+        # narrow neighborhood; definite background at ROI perimeter.
+        r = max(3, min(15, int(max(1, np.count_nonzero(strokes)**0.5) / 3)))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*r+1, 2*r+1))
+        probable_fg = cv2.dilate(strokes, kernel) > 0
+        trimap = np.full((h, w), cv2.GC_PR_BGD, dtype=np.uint8)
+        trimap[probable_fg] = cv2.GC_PR_FGD
+        trimap[strokes > 0] = cv2.GC_FGD
+        # Border represents outside of the selected local region.
+        trimap[:2, :] = cv2.GC_BGD
+        trimap[-2:, :] = cv2.GC_BGD
+        trimap[:, :2] = cv2.GC_BGD
+        trimap[:, -2:] = cv2.GC_BGD
+        if not np.any(trimap == cv2.GC_FGD):
+            output[y1:y2+1, x1:x2+1] = strokes.astype(bool)
+            return output
+        bgd = np.zeros((1, 65), dtype=np.float64)
+        fgd = np.zeros((1, 65), dtype=np.float64)
+        try:
+            cv2.grabCut(roi, trimap, None, bgd, fgd, 2, cv2.GC_INIT_WITH_MASK)
+            mask = (trimap == cv2.GC_FGD) | (trimap == cv2.GC_PR_FGD)
+            # Keep only components touching the brush. Avoid swallowing a
+            # distant similarly-colored object inside the prompt box.
+            n, labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+            touched = np.unique(labels[strokes > 0])
+            touched = touched[touched != 0]
+            mask = np.isin(labels, touched) if len(touched) else strokes.astype(bool)
+        except cv2.error:
+            # Even a flat-color image remains editable instead of throwing.
+            mask = strokes.astype(bool)
+        output[y1:y2+1, x1:x2+1] = mask
+        return output
 
     def _stroke_points_to_prompt(
         self,
@@ -210,12 +257,6 @@ class SamGuidedEditMixin:
         if alpha.shape[:2] != (h, w):
             alpha = cv2.resize(alpha, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        predictor = self._load_sam_predictor(
-            sam_checkpoint_path=sam_checkpoint_path,
-            model_type=sam_model_type,
-            device=sam_device,
-        )
-
         brush_mask = self._stroke_mask((h, w), stroke_points, brush_size)
         pts_full = np.array(stroke_points, dtype=np.float32)
         if pts_full.size == 0:
@@ -270,16 +311,39 @@ class SamGuidedEditMixin:
         except Exception:
             image_key = (str(image_path), int(w), int(h))
 
-        if getattr(self, "_sam_current_image_key", None) != image_key:
-            predictor.set_image(image_rgb)
-            self._sam_current_image_key = image_key
-
-        masks, scores, _ = predictor.predict(
-            point_coords=point_coords,
-            point_labels=point_labels,
-            box=box,
-            multimask_output=True,
+        use_fast_cpu = (
+            not getattr(self, 'strict_gpu', False)
+            and getattr(self, 'cpu_guided_backend', 'sam') == 'grabcut'
         )
+        if use_fast_cpu:
+            selected_backend = 'grabcut_cpu_fast'
+            masks = self._cpu_grabcut_mask(image_rgb, brush_mask, (x1, y1, x2, y2))[None, ...]
+            scores = np.array([0.0], dtype=np.float32)
+        else:
+            selected_backend = 'sam_onnx'
+            predictor = self._load_sam_predictor(
+                sam_checkpoint_path=sam_checkpoint_path,
+                model_type=sam_model_type,
+                device=sam_device,
+            )
+            if getattr(self, "_sam_current_image_key", None) != image_key:
+                from ..disk_cache import load_sam_embedding, save_sam_embedding
+                # Reuse GPU encoder outputs across Edit sessions without keeping
+                # the full ONNX encoder alive in RAM while editing is closed.
+                cached = load_sam_embedding(image_path, str(predictor.encoder_path)) if hasattr(predictor, 'encoder_path') else None
+                if cached is not None and tuple(cached[1]) == (h, w):
+                    predictor.set_cached_embedding(*cached)
+                else:
+                    predictor.set_image(image_rgb)
+                    if hasattr(predictor, 'encoder_path'):
+                        save_sam_embedding(image_path, str(predictor.encoder_path), predictor)
+                self._sam_current_image_key = image_key
+            masks, scores, _ = predictor.predict(
+                point_coords=point_coords,
+                point_labels=point_labels,
+                box=box,
+                multimask_output=True,
+            )
 
         if masks.ndim != 3 or masks.shape[0] == 0:
             raise RuntimeError(f"SAM trả mask không hợp lệ: {masks.shape}")
@@ -322,7 +386,7 @@ class SamGuidedEditMixin:
                 force_zero_mask=edit_mask,
                 force_one_mask=None,
             ) if refine_with_vitmatte else edited
-            source = f"guided_erase_sam_mask_score={float(scores[idx]):.4f}"
+            source = f"guided_erase_{selected_backend}_score={float(scores[idx]):.4f}"
         elif op == "restore":
             edited[edit_mask] = 255
             final = self._refine_alpha_from_user_edit(
@@ -331,7 +395,7 @@ class SamGuidedEditMixin:
                 force_zero_mask=None,
                 force_one_mask=edit_mask,
             ) if refine_with_vitmatte else edited
-            source = f"guided_restore_sam_mask_score={float(scores[idx]):.4f}"
+            source = f"guided_restore_{selected_backend}_score={float(scores[idx]):.4f}"
         else:
             raise ValueError("operation phải là 'erase' hoặc 'restore'.")
 
@@ -340,17 +404,19 @@ class SamGuidedEditMixin:
             final_alpha=final,
             elapsed_sec=time.time() - start,
             source=source,
+            include_debug=False,
         )
         prediction["guided_edit_info"] = {
             "operation": op,
-            "sam_score": float(scores[idx]),
+            "guided_backend": selected_backend,
+            "sam_score": float(scores[idx]) if not use_fast_cpu else None,
             "sam_selected_index": idx,
             "sam_all_scores": [float(x) for x in scores],
             "brush_size": int(brush_size),
             "stroke_points_count": len(stroke_points),
             "sam_prompt_xyxy": [int(x1), int(y1), int(x2), int(y2)],
             "sam_prompt_size": [int(x2 - x1 + 1), int(y2 - y1 + 1)],
-            "sam_embedding_cached": True,
+            "sam_embedding_cached": not use_fast_cpu,
         }
         return prediction
 

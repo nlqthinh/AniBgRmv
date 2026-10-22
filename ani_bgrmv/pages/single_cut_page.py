@@ -316,7 +316,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.status_label.setText(f"Đang xử lý: {Path(image_path).name}")
 
         self.current_thread = QThread()
-        self.current_worker = SingleCutWorker(engine, image_path)
+        self.current_worker = SingleCutWorker(engine, image_path, lightweight=not (SHOW_DEBUG_BUTTON and self.btn_debug.isChecked()))
         self.current_worker.moveToThread(self.current_thread)
 
         self.current_thread.started.connect(self.current_worker.run)

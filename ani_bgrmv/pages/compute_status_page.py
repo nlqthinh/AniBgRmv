@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ..device_management import GpuScanThread, current_selection
+from ..portable_device_settings import build_variant
 from ..styles import apply_button_style
 
 
@@ -19,18 +20,20 @@ class ComputeStatusPage(QWidget):
 
         title = QLabel("Trạng thái CPU/GPU")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 30px; font-weight: 800;")
+        title.setStyleSheet("font-size: 30px; font-weight: 800; color: #F5F7FA;")
         self.status = QLabel("Đang kiểm tra trạng thái xử lý...")
         self.status.setAlignment(Qt.AlignCenter)
         self.status.setWordWrap(True)
-        self.status.setStyleSheet("font-size: 16px; color: #444444;")
+        self.status.setStyleSheet("font-size: 16px; color: #F5F7FA;")
 
         self.mode_box = QComboBox()
         self.mode_box.addItem("Sử dụng CPU", "cpu")
         self.mode_box.addItem("Sử dụng GPU", "gpu")
+        if build_variant() == 'cpu':
+            self.mode_box.model().item(1).setEnabled(False)
         self.mode_box.setFixedWidth(260)
         self.mode_box.setMinimumHeight(46)
-        self.mode_box.setStyleSheet("font-size: 15px; padding: 6px; border: 1px solid #BBBBBB; border-radius: 8px;")
+        self.mode_box.setStyleSheet("font-size: 15px; padding: 6px; color: #F5F7FA; background-color: #252E3B; border: 1px solid #8A96A7; border-radius: 8px;")
 
         self.btn_check = QPushButton("GPU Check")
         self.btn_stop = QPushButton("Dừng")
@@ -43,12 +46,15 @@ class ComputeStatusPage(QWidget):
         self.gpu_box = QComboBox()
         self.gpu_box.setFixedWidth(260)
         self.gpu_box.setMinimumHeight(46)
-        self.gpu_box.setStyleSheet("font-size: 15px; padding: 6px; border: 1px solid #BBBBBB; border-radius: 8px;")
+        self.gpu_box.setStyleSheet("font-size: 15px; padding: 6px; color: #F5F7FA; background-color: #252E3B; border: 1px solid #8A96A7; border-radius: 8px;")
         self.gpu_box.setVisible(False)
-        self.check_status = QLabel("")
+        self.check_status = QLabel(
+            'CPU Lite: không chứa CUDA hoặc SAM ViT-B. Guided sử dụng GrabCut.'
+            if build_variant() == 'cpu' else ''
+        )
         self.check_status.setAlignment(Qt.AlignCenter)
         self.check_status.setWordWrap(True)
-        self.check_status.setStyleSheet("font-size: 13px; color: #555555;")
+        self.check_status.setStyleSheet("font-size: 13px; color: #D6DEE8;")
 
         gpu_row = QHBoxLayout()
         gpu_row.setSpacing(12)
@@ -96,7 +102,10 @@ class ComputeStatusPage(QWidget):
             self.gpu_box.setVisible(True)
         if selection["mode"] != "gpu":
             self.gpu_box.setVisible(False)
-            self.check_status.setText("")
+            self.check_status.setText(
+                'CPU Lite: không chứa CUDA hoặc SAM ViT-B. Guided sử dụng GrabCut.'
+                if build_variant() == 'cpu' else ''
+            )
 
     def set_applying(self, active):
         self.is_applying = active
@@ -115,7 +124,10 @@ class ComputeStatusPage(QWidget):
             if self.scan_thread:
                 self._stop_scan()
             self.gpu_box.setVisible(False)
-            self.check_status.setText("")
+            self.check_status.setText(
+                'CPU Lite: không chứa CUDA hoặc SAM ViT-B. Guided sử dụng GrabCut.'
+                if build_variant() == 'cpu' else ''
+            )
             self.selectionRequested.emit({"mode": "cpu", "gpu_id": None, "gpu_name": None})
         else:
             self.gpu_box.setVisible(bool(self.gpu_box.count()))
@@ -129,7 +141,7 @@ class ComputeStatusPage(QWidget):
         selection = {"mode": "gpu", "gpu_id": self.gpu_box.itemData(index),
                      "gpu_name": self.gpu_box.itemText(index)}
         if not str(selection["gpu_id"]).startswith("cuda:"):
-            self.check_status.setText("GPU này không hỗ trợ chế độ A: SAM/PyTorch và ONNX CUDA phải dùng cùng GPU. Không chạy CPU thay thế.")
+            self.check_status.setText("GPU này không hỗ trợ chế độ A: F3/M7/SAM ONNX phải dùng cùng GPU. Không chạy CPU thay thế.")
         else:
             self.check_status.setText("")
         self.selectionRequested.emit(selection)

@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import Qt, QRectF, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QSizePolicy
 from ..utils import pil_to_pixmap
 from .background_swatches import BackgroundSwatches, BACKGROUND_COLORS
@@ -15,7 +15,7 @@ ERASE_CURSOR_RGB = (255, 0, 0)
 RESTORE_CURSOR_RGB = (0, 220, 75)
 BRUSH_CURSOR_OUTLINE_ALPHA = 75  # trước đây 170; nay mờ hơn một nửa
 BRUSH_CURSOR_FILL_ALPHA = 18     # trước đây 45; nay mờ hơn một nửa
-GUIDED_STROKE_ALPHA = 165       # nét SAM dùng để đánh dấu vùng chọn
+GUIDED_STROKE_ALPHA = 124       # M37.2: nét màu Guided/SAM nhạt hơn ~25% so với 165 (0..255)
 
 class EditMaskCanvas(QFrame):
     strokeStarted = Signal()
@@ -43,6 +43,7 @@ class EditMaskCanvas(QFrame):
         )
 
         self.image_rgb: np.ndarray | None = None
+        self._loaded_image_path: str | None = None
         self.alpha: np.ndarray | None = None
         self.operation = "erase"
         self.brush_size = 28
@@ -72,9 +73,22 @@ class EditMaskCanvas(QFrame):
     def invalidate_preview_cache(self):
         self._preview_cache = None
 
+    def clear_image(self):
+        """Release large RGB, alpha and QPixmap buffers after Edit ends."""
+        self.image_rgb = None
+        self._loaded_image_path = None
+        self.alpha = None
+        self._preview_cache = None
+        self.stroke_points = []
+        self._hover_inside = False
+        self._hover_pos = None
+        self.update()
+
     def set_image_alpha(self, image_path: str, alpha: np.ndarray):
-        image = Image.open(image_path).convert("RGB")
-        self.image_rgb = np.asarray(image)
+        if self.image_rgb is None or self._loaded_image_path != str(image_path):
+            with Image.open(image_path) as source:
+                self.image_rgb = np.asarray(source.convert('RGB'))
+            self._loaded_image_path = str(image_path)
         self.alpha = np.asarray(alpha).astype(np.uint8).copy()
         if self.alpha.shape[:2] != self.image_rgb.shape[:2]:
             self.alpha = cv2.resize(
@@ -184,27 +198,39 @@ class EditMaskCanvas(QFrame):
         return rect.left() + x * scale, rect.top() + y * scale
 
     def _render_preview_region(self, x0: int, y0: int, x1: int, y1: int) -> Image.Image:
-        """Composite a region in image coordinates, using the same preview backing.
+        """Memory-efficient alpha composite, preserving M37.2 backgrounds.
 
-        Used for both full preview and incremental Manual brush updates.  The
-        checkerboard is anchored to image (0,0), so ROI patches match precisely.
+        Previously rgb.astype(float32) and multiple RGB-sized temporaries
+        could briefly allocate hundreds of MiB on a 4K/8K image. Work per
+        channel; manual strokes continue updating only the brushed rectangle.
         """
         assert self.image_rgb is not None and self.alpha is not None
-        rgb = self.image_rgb[y0:y1, x0:x1].astype(np.float32)
-        a = (self.alpha[y0:y1, x0:x1].astype(np.float32) / 255.0)[..., None]
+        alpha = self.alpha[y0:y1, x0:x1].astype(np.float32)
+        ghost = 0.48 if self.operation == 'restore' else 0.0
+        visible = alpha * ((1.0 - ghost) / 255.0)
+        visible += ghost
+        invisible = 1.0 - visible
 
-        if self._background_mode == "transparent":
+        if self._background_mode == 'transparent':
             rows = np.arange(y0, y1)[:, None] // 24
             cols = np.arange(x0, x1)[None, :] // 24
-            gray = np.where((rows + cols) % 2 == 0, 220, 255).astype(np.float32)
-            bg = gray[..., None]
+            checker = np.where((rows + cols) % 2 == 0, 220.0, 255.0).astype(np.float32)
+            bg_multiplier = checker * invisible
+            background = None
         else:
-            bg = np.array(BACKGROUND_COLORS[self._background_mode], dtype=np.float32)
+            background = BACKGROUND_COLORS[self._background_mode]
+            bg_multiplier = None
 
-        ghost = 0.48 if self.operation == "restore" else 0.0
-        visible = a + (1.0 - a) * ghost
-        out = rgb * visible + bg * (1.0 - visible)
-        return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
+        out = np.empty((y1-y0, x1-x0, 3), dtype=np.uint8)
+        for channel in range(3):
+            color = self.image_rgb[y0:y1, x0:x1, channel].astype(np.float32)
+            color *= visible
+            if bg_multiplier is None:
+                color += float(background[channel]) * invisible
+            else:
+                color += bg_multiplier
+            out[...,channel] = np.clip(color, 0, 255).astype(np.uint8)
+        return Image.fromarray(out, mode='RGB')
 
     def _render_preview(self) -> Image.Image:
         assert self.image_rgb is not None
@@ -265,10 +291,16 @@ class EditMaskCanvas(QFrame):
                 x, y = self._image_to_widget(*self.stroke_points[0])
                 painter.drawPoint(int(x), int(y))
             else:
-                for p1, p2 in zip(self.stroke_points[:-1], self.stroke_points[1:]):
-                    x1, y1 = self._image_to_widget(*p1)
-                    x2, y2 = self._image_to_widget(*p2)
-                    painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+                # M37.2: draw the whole stroke in ONE path. Painting separate
+                # segments re-composited their translucent caps/joins, making
+                # fast strokes noticeably darker where consecutive segments meet.
+                x0, y0 = self._image_to_widget(*self.stroke_points[0])
+                stroke_path = QPainterPath()
+                stroke_path.moveTo(x0, y0)
+                for point in self.stroke_points[1:]:
+                    wx, wy = self._image_to_widget(*point)
+                    stroke_path.lineTo(wx, wy)
+                painter.drawPath(stroke_path)
 
         # Brush cursor is translucent and follows the selected operation.
         if self._hover_inside and self._hover_pos is not None and not self.processing:

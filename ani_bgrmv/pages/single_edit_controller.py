@@ -21,7 +21,9 @@ class SingleEditControllerMixin:
             return
 
         self.in_edit_mode = True
-        self.edit_start_prediction = self.clone_prediction_with_alpha(self.current_prediction, self.current_prediction["final_alpha"])
+        # Only the original alpha is needed for Discard; avoid cloning the
+        # entire RGBA cutout and both full-resolution debug previews.
+        self.edit_start_prediction = np.asarray(self.current_prediction['final_alpha']).copy()
         self.edit_dirty = False
         self.edit_undo_stack = []
         self.edit_redo_stack = []
@@ -51,19 +53,36 @@ class SingleEditControllerMixin:
         self.edit_canvas.reset_view()
         self.refresh_edit_canvas()
         self.update_undo_redo_buttons()
-        self.status_label.setText("Đang ở Edit mode. Guided dùng SAM để chọn vùng nhanh; Manual sửa alpha trực tiếp.")
+        eng = self.engine_getter()
+        guided_desc = ("GrabCut nhanh trên CPU (khác SAM)" if eng and
+                       not getattr(eng, 'strict_gpu', False) and
+                       getattr(eng, 'cpu_guided_backend', '') == 'grabcut'
+                       else "SAM ONNX")
+        self.status_label.setText(f"Đang ở Edit mode. Guided dùng {guided_desc}; Manual sửa alpha trực tiếp.")
         self.refresh_single_layout()
 
     def force_exit_edit(self, discard: bool = False):
-        if discard and self.edit_start_prediction is not None:
-            self.current_prediction = self.edit_start_prediction
+        if discard and self.edit_start_prediction is not None and self.current_prediction:
+            self.current_prediction = self.clone_prediction_with_alpha(
+                self.current_prediction, self.edit_start_prediction
+            )
         self.in_edit_mode = False
         self.edit_start_prediction = None
         self.edit_dirty = False
         self.edit_undo_stack = []
         self.edit_redo_stack = []
         self.edit_canvas.setVisible(False)
+        # The Edit canvas owns independent RGB/alpha buffers and a QPixmap;
+        # free them when the user closes Edit instead of keeping an image copy.
+        self.edit_canvas.clear_image()
         self.canvas.setVisible(True)
+        # SAM ONNX encoder/decoder and their CUDA arenas are enormous. Preserve
+        # their cached embedding on disk (handled during set_image), then close
+        # the sessions once no Guided worker is running.
+        if not self.is_guided_thread_running():
+            engine = self.engine_getter()
+            if engine is not None and hasattr(engine, 'release_sam_resources'):
+                engine.release_sam_resources()
         self.edit_top_widget.setVisible(False)
         self.normal_buttons_widget.setVisible(True)
         self.edit_buttons_widget.setVisible(False)
@@ -182,6 +201,7 @@ class SingleEditControllerMixin:
             final_alpha=np.asarray(alpha).astype(np.uint8),
             elapsed_sec=prediction.get("elapsed_sec", 0.0),
             source="ui_edit_clone",
+            include_debug=False,
         )
         return self.preserve_inference_debug(edited, prediction)
 
@@ -210,7 +230,13 @@ class SingleEditControllerMixin:
         self.edit_canvas.set_stroke_preview_enabled(submode == "guided")
         self.btn_guided.setChecked(submode == "guided")
         self.btn_manual.setChecked(submode == "manual")
-        self.status_label.setText("Guided: SAM chọn vùng nhanh, không chạy ViTMatte mỗi nét để tránh lag." if submode == "guided" else "Manual: vẽ trực tiếp lên alpha, không chạy SAM.")
+        eng = self.engine_getter()
+        fast_cpu = (eng and not getattr(eng, 'strict_gpu', False) and
+                    getattr(eng, 'cpu_guided_backend', '') == 'grabcut')
+        self.status_label.setText(
+            ("Guided CPU nhanh: GrabCut (mask có thể khác SAM)." if fast_cpu
+             else "Guided: SAM ONNX chọn vùng, không chạy ViTMatte mỗi nét.")
+            if submode == 'guided' else "Manual: vẽ trực tiếp lên alpha, không chạy SAM.")
 
     def toggle_brush_slider(self):
         self.set_brush_panel_visible(not self.brush_panel_widget.isVisible())
@@ -219,12 +245,21 @@ class SingleEditControllerMixin:
         self.edit_canvas.set_brush_size(value)
         self.status_label.setText(f"Brush size: {value}px")
 
+    @staticmethod
+    def _cap_edit_history(history, budget_mib: int = 96):
+        # Large images otherwise keep 30 full-resolution alpha copies in RAM.
+        # Keep at least one undo state, but cap older history at ~96 MiB.
+        budget = max(16, budget_mib) * 1024 * 1024
+        while len(history) > 1 and sum(getattr(a, 'nbytes', 0) for a in history) > budget:
+            history.pop(0)
+
     def push_undo_state(self):
         if not self.current_prediction:
             return
         self.edit_undo_stack.append(np.asarray(self.current_prediction["final_alpha"]).copy())
         if len(self.edit_undo_stack) > 30:
             self.edit_undo_stack.pop(0)
+        self._cap_edit_history(self.edit_undo_stack)
         self.edit_redo_stack.clear()
         self.update_undo_redo_buttons()
 
@@ -236,6 +271,7 @@ class SingleEditControllerMixin:
         if not self.in_edit_mode or not self.current_prediction or not self.edit_undo_stack:
             return
         self.edit_redo_stack.append(np.asarray(self.current_prediction["final_alpha"]).copy())
+        self._cap_edit_history(self.edit_redo_stack)
         alpha = self.edit_undo_stack.pop()
         self.current_prediction = self.clone_prediction_with_alpha(self.current_prediction, alpha)
         self.refresh_edit_canvas()
@@ -246,6 +282,7 @@ class SingleEditControllerMixin:
         if not self.in_edit_mode or not self.current_prediction or not self.edit_redo_stack:
             return
         self.edit_undo_stack.append(np.asarray(self.current_prediction["final_alpha"]).copy())
+        self._cap_edit_history(self.edit_undo_stack)
         alpha = self.edit_redo_stack.pop()
         self.current_prediction = self.clone_prediction_with_alpha(self.current_prediction, alpha)
         self.refresh_edit_canvas()
@@ -351,6 +388,12 @@ class SingleEditControllerMixin:
     def on_guided_thread_finished_cleanup(self):
         self.edit_thread = None
         self.edit_worker = None
+        # Leaving Edit before the worker's QThread fully quits must not leave
+        # its large SAM sessions allocated for the rest of the app lifetime.
+        if not self.in_edit_mode:
+            engine = self.engine_getter()
+            if engine is not None and hasattr(engine, 'release_sam_resources'):
+                engine.release_sam_resources()
 
     def start_guided_edit(self, points: list):
         engine = self.engine_getter()
@@ -444,7 +487,7 @@ class SingleEditControllerMixin:
             self.edit_canvas.set_processing(False)
             self.edit_canvas.clear_stroke()
             self.set_edit_controls_enabled(True)
-            self.status_label.setText("SAM đã trả kết quả sau khi bị dừng, app đã bỏ qua kết quả đó.")
+            self.status_label.setText("Guided Edit đã trả kết quả sau khi bị dừng, app đã bỏ qua kết quả đó.")
             return
 
         # SAM returns a newly built prediction; restore the original inference

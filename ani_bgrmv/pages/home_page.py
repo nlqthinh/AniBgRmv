@@ -13,11 +13,11 @@ class HomePage(QWidget):
 
         title = QLabel("Anime Background Remover")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 30px; font-weight: 800;")
+        title.setStyleSheet("font-size: 30px; font-weight: 800; color: #F5F7FA;")
 
         subtitle = QLabel("Chọn tác vụ cần làm")
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("font-size: 15px; color: #555555;")
+        subtitle.setStyleSheet("font-size: 15px; color: #D6DEE8;")
 
         self.btn_single = QPushButton("Cắt nền 1 hình")
         self.btn_batch = QPushButton("Cắt nhiều hình")

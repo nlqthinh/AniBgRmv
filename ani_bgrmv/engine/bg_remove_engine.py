@@ -49,14 +49,28 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
             raise FileNotFoundError(f"Không tìm thấy ViTMatte/M7 ONNX: {self.m6_model_path}")
 
         # Explicit CPU by default, rather than automatically preferring a GPU.
-        # Strict GPU mode validates PyTorch/SAM CUDA *and* both ONNX sessions.
+        # Strict GPU mode validates ONNX/CUDA and all four model assets.
         from ..device_management import normalized_selection, cuda_index, verify_gpu_for_sam
 
         self.compute_selection = normalized_selection(compute_selection)
         self.compute_mode = self.compute_selection["mode"]
         self.sam_device = "cpu"
         self.strict_gpu = self.compute_mode == "gpu"
-        session_options = ort.SessionOptions()
+        # Old dual-core CPUs can thrash RAM/threads with ORT defaults. Keep
+        # thread pools modest; never change the 768x768 model input/quality.
+        if not self.strict_gpu:
+            from ..cpu_optimizations import cpu_session_options
+            session_options = cpu_session_options()
+        else:
+            session_options = ort.SessionOptions()
+            # Keep model computation on CUDA; do not reserve large host-side
+            # CPU memory patterns for GPU sessions.
+            session_options.enable_cpu_mem_arena = False
+            session_options.enable_mem_pattern = False
+        from ..app_config import APP_CONFIG
+        self.cpu_guided_backend = str(APP_CONFIG.get('sam', {}).get('cpu_guided_backend', 'grabcut')).lower()
+        if self.cpu_guided_backend not in ('grabcut', 'sam'):
+            self.cpu_guided_backend = 'grabcut' 
         if self.strict_gpu:
             index, gpu_name = verify_gpu_for_sam(self.compute_selection)
             self.sam_device = f"cuda:{index}"
@@ -69,22 +83,14 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
                     "với app; chạy 'python tools/diagnose_gpu.py'. "
                     "Không dùng CPU fallback."
                 )
-            # Importing torch above usually preloads CUDA/cuDNN from its wheel.
-            # ORT >= 1.21 also provides an explicit Windows DLL preloader.
-            # See https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html
-            if hasattr(ort, "preload_dlls"):
-                try:
-                    ort.preload_dlls()
-                except Exception as exc:
-                    raise RuntimeError(
-                        "Không nạp được CUDA/cuDNN DLL cho ONNX Runtime GPU: "
-                        f"{exc}. Kiểm tra phiên bản PyTorch CUDA và "
-                        "onnxruntime-gpu có cùng CUDA/cuDNN major version. "
-                        "Không dùng CPU fallback."
-                    ) from exc
+            # verify_gpu_for_sam() already preloads CUDA/cuDNN without importing torch.
             if providers is not None:
                 raise ValueError("Không được override ONNX providers ở chế độ GPU bắt buộc.")
-            self.providers = [("CUDAExecutionProvider", {"device_id": str(index)})]
+            from ..gpu_memory_options import cuda_provider_options
+            self.providers = [(
+                "CUDAExecutionProvider",
+                cuda_provider_options(index, settings=APP_CONFIG.get('compute', {})),
+            )]
             # ORT must fail instead of silently assigning unsupported nodes to CPU.
             session_options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
         else:
@@ -116,8 +122,18 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
             for session in (self.f2_sess, self.m6_sess):
                 if session.get_providers() != ["CPUExecutionProvider"]:
                     raise RuntimeError("CPU mode chỉ được chạy CPUExecutionProvider.")
-        self.runtime_info = (f"GPU {gpu_name} (cuda:{index}) — F3/M7: CUDA, SAM: CUDA"
-                             if self.strict_gpu else "CPU — F3/M7/SAM: CPU")
+        # Validate both SAM ONNX assets even though the heavy SAM sessions are
+        # lazy-loaded when Guided Edit is first used (to conserve GTX 1650 VRAM).
+        from ..app_config import SAM_ENCODER_ONNX_PATH, SAM_DECODER_ONNX_PATH
+        if self.strict_gpu or self.cpu_guided_backend == 'sam':
+            for label, path in (("encoder", SAM_ENCODER_ONNX_PATH), ("decoder", SAM_DECODER_ONNX_PATH)):
+                if not Path(path).is_file():
+                    raise FileNotFoundError(f"Không tìm thấy SAM ONNX {label}: {path}")
+        self.runtime_info = (f"GPU {gpu_name} (cuda:{index}) — F3/M7: CUDA, SAM ONNX: CUDA (lazy)"
+                             if self.strict_gpu else
+                             ("CPU — F3/M7: ONNX, Guided: GrabCut (nhanh, khác SAM)"
+                              if self.cpu_guided_backend == 'grabcut'
+                              else "CPU — F3/M7/SAM ONNX: CPU (lazy)"))
 
         self.f2_input_name = self.f2_sess.get_inputs()[0].name
         self.m6_input_name = self.m6_sess.get_inputs()[0].name
@@ -590,7 +606,7 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
 
         return self._clip_vitmatte_alpha(y)
 
-    def predict_alpha(self, image_path: str) -> dict:
+    def predict_alpha(self, image_path: str, include_debug: bool = True) -> dict:
         image_pil = Image.open(image_path).convert("RGB")
 
         image_letterbox_pil, valid_mask_768, meta = self._letterbox_rgb_for_m7(image_pil)
@@ -624,6 +640,25 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         vit_alpha_for_final = vit_alpha_fixed if use_vit_fix else vit_alpha_letterbox
 
         final_alpha_original = self._restore_alpha_from_letterbox(vit_alpha_for_final, meta)
+        if not include_debug:
+            # Debug OFF: no needless restoration of the F3 mask to a 4K/8K
+            # source image, no uint8 copies of all 768px inference tensors.
+            return {
+                'final_alpha': final_alpha_original,
+                'f3_letterbox_meta': meta,
+                'trimap_stats': self.trimap_stats(trimap_768),
+                'trimap_stats_valid': f3_selection.get('trimap_stats_valid', {}),
+                'alpha_fix_stats': {
+                    'f3_selected_mode': f3_selection['selected_mode'],
+                    'f3_fix': f3_selection['alpha_fix_stats'],
+                    'vit_fix_used_for_final': use_vit_fix,
+                },
+                'vitmatte_edge_stats': {
+                    'edge_refine_used': False,
+                    'mode': 'm7_letterbox_full_vitmatte',
+                },
+                'safety_notes': ['M47_release_lightweight', 'M7_full_vitmatte'],
+            }
         unet_alpha_original = self._restore_alpha_from_letterbox(f3_alpha_letterbox, meta)
 
         def alpha_float_to_uint8(x: np.ndarray) -> np.ndarray:
@@ -672,14 +707,14 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         }
 
     def make_cutout(self, image_path: str, alpha: np.ndarray) -> Image.Image:
-        image_pil = Image.open(image_path).convert("RGBA")
-        rgba = np.asarray(image_pil).copy()
-
-        if alpha.shape[:2] != rgba.shape[:2]:
-            alpha = cv2.resize(alpha, (rgba.shape[1], rgba.shape[0]), interpolation=cv2.INTER_LINEAR)
-
-        rgba[:, :, 3] = alpha.astype(np.uint8)
-        return Image.fromarray(rgba, mode="RGBA")
+        # putalpha avoids allocating another whole-image RGBA numpy copy.
+        with Image.open(image_path) as source:
+            rgba = source.convert('RGBA')
+        alpha = np.asarray(alpha, dtype=np.uint8)
+        if alpha.shape[:2] != (rgba.height, rgba.width):
+            alpha = cv2.resize(alpha, rgba.size, interpolation=cv2.INTER_LINEAR)
+        rgba.putalpha(Image.fromarray(alpha, 'L'))
+        return rgba
 
     def make_preview_white(self, cutout_pil: Image.Image) -> Image.Image:
         cutout_pil = cutout_pil.convert("RGBA")
@@ -711,6 +746,7 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         final_alpha: np.ndarray,
         elapsed_sec: float = 0.0,
         source: str = "edited_alpha",
+        include_debug: bool = True,
     ) -> dict:
         """
         Build a prediction dictionary from an externally edited alpha matte.
@@ -722,6 +758,18 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         alpha = np.asarray(final_alpha).astype(np.uint8)
         if alpha.shape[:2] != (image_pil.height, image_pil.width):
             alpha = cv2.resize(alpha, (image_pil.width, image_pil.height), interpolation=cv2.INTER_LINEAR)
+
+        # Build preview/edit predictions without allocating artificial 768px
+        # masks and two more full-resolution RGB previews. True model debug is
+        # kept on the original prediction, not invented after a brush edit.
+        if not include_debug:
+            return {
+                'input_path': image_path,
+                'final_alpha': alpha,
+                'cutout_pil': self.make_cutout(image_path, alpha),
+                'elapsed_sec': elapsed_sec,
+                'safety_notes': [source],
+            }
 
         alpha_768 = cv2.resize(alpha, (self.size, self.size), interpolation=cv2.INTER_LINEAR)
         alpha_768_float = alpha_768.astype(np.float32) / 255.0
@@ -753,12 +801,25 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
             "elapsed_sec": elapsed_sec,
         }
 
-    def process_for_preview(self, image_path: str) -> dict:
+    def process_for_preview(self, image_path: str, include_debug: bool = True) -> dict:
         start = time.time()
         image_path = str(image_path)
 
-        pred = self.predict_alpha(image_path)
+        pred = self.predict_alpha(image_path, include_debug=include_debug)
         cutout = self.make_cutout(image_path, pred["final_alpha"])
+        if not include_debug:
+            # CPU Release/BATCH: do not keep ~tens of MB of debug arrays and
+            # duplicate preview images for every image while waiting to save.
+            return {
+                'input_path': image_path, 'final_alpha': pred['final_alpha'],
+                'cutout_pil': cutout, 'elapsed_sec': time.time() - start,
+                'trimap_stats': pred.get('trimap_stats', {}),
+                'alpha_fix_stats': pred.get('alpha_fix_stats', {}),
+                'vitmatte_edge_stats': pred.get('vitmatte_edge_stats', {}),
+                'trimap_stats_valid': pred.get('trimap_stats_valid', {}),
+                'f3_letterbox_meta': pred.get('f3_letterbox_meta', {}),
+                'safety_notes': pred.get('safety_notes', []),
+            }
         preview_checker = self.make_preview_checker(cutout)
         preview_white = self.make_preview_white(cutout)
 

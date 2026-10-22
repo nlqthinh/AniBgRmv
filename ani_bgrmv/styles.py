@@ -1,4 +1,5 @@
-from PySide6.QtWidgets import QPushButton, QSizePolicy
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication, QPushButton, QSizePolicy
 
 BUTTON_STYLE = """
 QPushButton {
@@ -142,3 +143,67 @@ def apply_button_style(button: QPushButton, primary: bool = False):
 # =========================
 # SMALL HELPERS
 # =========================
+
+# M49 — theme cố định, không phụ thuộc Windows light/dark mode.
+# Giữ canvas upload/Edit màu sáng để xem ảnh rõ; phần giao diện bên ngoài tối.
+APP_DARK_BG = "#171B22"
+APP_TEXT_COLOR = "#F5F7FA"
+APP_MUTED_TEXT_COLOR = "#D6DEE8"
+
+
+def apply_fixed_dark_theme(app: QApplication) -> None:
+    """Áp dụng palette tối cho toàn bộ app TRƯỚC khi khởi tạo MainWindow.
+
+    Fusion là Qt style đa nền tảng và tránh Qt/Windows tự đổi màu widget
+    theo theme của từng PC. QPalette xử lý widget không có stylesheet riêng;
+    QSS bên dưới cố định nền trang và popup QComboBox.
+    """
+    app.setStyle("Fusion")
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(APP_DARK_BG))
+    palette.setColor(QPalette.WindowText, QColor(APP_TEXT_COLOR))
+    palette.setColor(QPalette.Base, QColor("#222A35"))
+    palette.setColor(QPalette.AlternateBase, QColor("#2B3543"))
+    palette.setColor(QPalette.Text, QColor(APP_TEXT_COLOR))
+    palette.setColor(QPalette.Button, QColor("#313B48"))
+    palette.setColor(QPalette.ButtonText, QColor(APP_TEXT_COLOR))
+    palette.setColor(QPalette.Highlight, QColor("#387CE8"))
+    palette.setColor(QPalette.HighlightedText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#252D37"))
+    palette.setColor(QPalette.ToolTipText, QColor("#FFFFFF"))
+    palette.setColor(QPalette.Link, QColor("#8BC0FF"))
+    palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#98A3B0"))
+    palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#98A3B0"))
+    palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#98A3B0"))
+    app.setPalette(palette)
+    # Only the named root/page widgets receive an explicit dark background.
+    # Do NOT style every QWidget/QFrame globally: the image canvases have
+    # their own intentionally light backgrounds and must stay untouched.
+    app.setStyleSheet("""
+        QWidget#AniBgRmvMainWindow,
+        QWidget#AniBgRmvHomePage,
+        QWidget#AniBgRmvSinglePage,
+        QWidget#AniBgRmvBatchPage,
+        QWidget#AniBgRmvComputePage {
+            background-color: #171B22;
+            color: #F5F7FA;
+        }
+        QComboBox {
+            color: #F5F7FA;
+            background-color: #252E3B;
+            selection-color: #FFFFFF;
+            selection-background-color: #387CE8;
+        }
+        QComboBox QAbstractItemView {
+            color: #F5F7FA;
+            background-color: #252E3B;
+            selection-color: #FFFFFF;
+            selection-background-color: #387CE8;
+        }
+        QToolTip {
+            color: #FFFFFF;
+            background-color: #252D37;
+            border: 1px solid #657287;
+        }
+    """)
+
