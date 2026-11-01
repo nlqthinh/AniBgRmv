@@ -40,6 +40,8 @@ class BackgroundSwatches(QWidget):
     """Four 38x38 swatches. `backgroundChanged` fires on user clicks only."""
 
     backgroundChanged = Signal(str)
+    # Also report clicks on the already selected swatch (for Edit opacity UI).
+    swatchClicked = Signal(str, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -85,9 +87,11 @@ class BackgroundSwatches(QWidget):
         return self._mode
 
     def _user_select(self, mode: str):
-        if mode != self._mode:
+        was_selected = mode == self._mode
+        if not was_selected:
             self.set_mode(mode)
             self.backgroundChanged.emit(mode)
+        self.swatchClicked.emit(mode, was_selected)
 
     def set_mode(self, mode: str):
         if mode not in BACKGROUND_MODES:

@@ -65,23 +65,11 @@ def cuda_index(selection):
     return int(match.group(1))
 
 
-# Keep directory handles alive: Windows searches those for dependent CUDA DLLs.
-_CUDA_DLL_HANDLES = []
-
-
+# M78: use exactly the same CUDA/cuDNN loader in GUI and frozen self-test.
+# The loader is invoked by the PyInstaller runtime hook before GUI startup.
 def preload_cuda_runtime():
-    """Preload CUDA/cuDNN without importing torch in the frozen app."""
-    import onnxruntime as ort
-    # PyInstaller's gpu_runtime folder contains only selected CUDA DLLs, not torch.
-    root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
-    bundled = root / "gpu_runtime"
-    if os.name == 'nt' and bundled.is_dir():
-        _CUDA_DLL_HANDLES.append(os.add_dll_directory(str(bundled)))
-        if hasattr(ort, 'preload_dlls'):
-            ort.preload_dlls(directory=str(bundled))
-    elif hasattr(ort, 'preload_dlls'):
-        # Dev environment: use torch/lib DLLs if present, but NEVER import torch.
-        ort.preload_dlls()
+    from .cuda_bundle_runtime import preload_runtime
+    preload_runtime()
 
 
 def verify_gpu_for_sam(selection):
@@ -96,11 +84,12 @@ def verify_gpu_for_sam(selection):
             f"onnxruntime {ort.__version__} không có CUDAExecutionProvider. "
             "Cần onnxruntime-gpu CUDA phù hợp; không fallback CPU."
         )
-    from .app_config import SAM_ENCODER_ONNX_PATH, SAM_DECODER_ONNX_PATH
-    for label, path in (("SAM encoder", SAM_ENCODER_ONNX_PATH),
-                        ("SAM decoder", SAM_DECODER_ONNX_PATH)):
+    # Check the ACTUAL selected backend; HQ3 ONNX must not require legacy
+    # SAM ViT-B graphs, and HQ3 Torch must not need non-selected ONNX files.
+    from .app_config import sam_runtime_assets
+    for label, path in sam_runtime_assets():
         if not Path(path).is_file():
-            raise RuntimeError(f"Không tìm thấy {label}: {path}. Cần hai file SAM ONNX.")
+            raise RuntimeError(f"Không tìm thấy {label}: {path}.")
 
     # Respect strict same-GPU semantics: CUDA_VISIBLE_DEVICES can remap indices.
     visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').strip()

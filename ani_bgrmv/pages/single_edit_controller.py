@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from ..app_config import (
     GUIDED_EDIT_TIMEOUT_MS,
+    SAM_BACKEND,
     SAM_CHECKPOINT_PATH,
     SAM_DEVICE,
     SAM_MODEL_TYPE,
@@ -29,6 +30,7 @@ class SingleEditControllerMixin:
         self.edit_redo_stack = []
         self.edit_operation = "erase"
         self.edit_submode = "guided"
+        self.edit_draw_mode = "paint"
 
         self.canvas.setVisible(False)
         self.edit_canvas.setVisible(True)
@@ -37,12 +39,16 @@ class SingleEditControllerMixin:
         self.edit_buttons_widget.setVisible(True)
         self.path_label.setVisible(False)
         self.btn_back.setEnabled(True)
-        self.instruction_label.setText("Edit: Erase/Restore, Guided/Manual. Giữ Shift + kéo chuột để pan, cuộn chuột để zoom.")
+        self.instruction_label.setText("Edit: Paint/Box + Guided/Manual. Giữ Shift + kéo để pan; cuộn để zoom.")
 
         self.btn_erase.setChecked(True)
         self.btn_restore.setChecked(False)
         self.btn_guided.setChecked(True)
         self.btn_manual.setChecked(False)
+        self.btn_paint_mode.setChecked(True)
+        self.btn_box_mode.setChecked(False)
+        self.edit_canvas.set_draw_mode("paint")
+        self.btn_brush_size.setVisible(True)
         self.set_brush_panel_visible(False)
         self.btn_stop_guided.setVisible(False)
 
@@ -57,7 +63,9 @@ class SingleEditControllerMixin:
         guided_desc = ("GrabCut nhanh trên CPU (khác SAM)" if eng and
                        not getattr(eng, 'strict_gpu', False) and
                        getattr(eng, 'cpu_guided_backend', '') == 'grabcut'
-                       else "SAM ONNX")
+                       else ("HQ3 BEST + M71" if SAM_BACKEND in ("hq3_torch", "hq3_onnx")
+                             else "HQ2 BEST + M7" if SAM_BACKEND == "hq2_torch"
+                             else "SAM ViT-B ONNX"))
         self.status_label.setText(f"Đang ở Edit mode. Guided dùng {guided_desc}; Manual sửa alpha trực tiếp.")
         self.refresh_single_layout()
 
@@ -76,9 +84,9 @@ class SingleEditControllerMixin:
         # free them when the user closes Edit instead of keeping an image copy.
         self.edit_canvas.clear_image()
         self.canvas.setVisible(True)
-        # SAM ONNX encoder/decoder and their CUDA arenas are enormous. Preserve
-        # their cached embedding on disk (handled during set_image), then close
-        # the sessions once no Guided worker is running.
+        # Release Guided backend resources only after the worker has stopped.
+        # The ViT-B path keeps its embedding disk cache; HQ2 is reused during
+        # this Edit session and rebuilt when the user enters Edit again.
         if not self.is_guided_thread_running():
             engine = self.engine_getter()
             if engine is not None and hasattr(engine, 'release_sam_resources'):
@@ -112,7 +120,7 @@ class SingleEditControllerMixin:
         self.repaint()
 
     def set_brush_panel_visible(self, visible: bool):
-        self.brush_panel_widget.setVisible(bool(visible))
+        self.brush_panel_widget.setVisible(bool(visible) and self.edit_draw_mode == "paint")
         self.refresh_single_layout()
 
     def exit_edit_mode_confirm(self, go_home: bool = False):
@@ -235,11 +243,37 @@ class SingleEditControllerMixin:
                     getattr(eng, 'cpu_guided_backend', '') == 'grabcut')
         self.status_label.setText(
             ("Guided CPU nhanh: GrabCut (mask có thể khác SAM)." if fast_cpu
-             else "Guided: SAM ONNX chọn vùng, không chạy ViTMatte mỗi nét.")
+             else ("Guided: HQ3 BEST chọn vùng, M71 refine sau nét."
+                   if SAM_BACKEND in ("hq3_torch", "hq3_onnx") else
+                   "Guided: HQ2 BEST chọn vùng, M7 refine sau nét."
+                   if SAM_BACKEND == "hq2_torch" else
+                   "Guided: SAM ViT-B ONNX chọn vùng, không chạy M7 mỗi nét."))
             if submode == 'guided' else "Manual: vẽ trực tiếp lên alpha, không chạy SAM.")
 
+    def set_edit_draw_mode(self, mode: str):
+        """Paint vs rectangle input; independent of Guided/Manual segmentation."""
+        if mode not in ("paint", "box"):
+            raise ValueError("Unknown drawing mode")
+        if (self.edit_canvas.processing or self.guided_running
+                or self.edit_canvas.is_drawing or self.is_guided_thread_running()):
+            self.btn_paint_mode.setChecked(self.edit_draw_mode == "paint")
+            self.btn_box_mode.setChecked(self.edit_draw_mode == "box")
+            return
+        self.edit_draw_mode = mode
+        self.edit_canvas.set_draw_mode(mode)
+        self.btn_paint_mode.setChecked(mode == "paint")
+        self.btn_box_mode.setChecked(mode == "box")
+        self.btn_brush_size.setVisible(mode == "paint")
+        if mode == "box":
+            self.set_brush_panel_visible(False)
+        self.status_label.setText(
+            "Box: kéo khung chữ nhật; Guided nhận diện vật thể, Manual sửa toàn khung."
+            if mode == "box" else "Paint: kéo cọ để Erase/Restore.")
+        self.refresh_single_layout()
+
     def toggle_brush_slider(self):
-        self.set_brush_panel_visible(not self.brush_panel_widget.isVisible())
+        if self.edit_draw_mode == "paint":
+            self.set_brush_panel_visible(not self.brush_panel_widget.isVisible())
 
     def on_brush_size_changed(self, value: int):
         self.edit_canvas.set_brush_size(value)
@@ -267,6 +301,38 @@ class SingleEditControllerMixin:
         self.btn_undo.setEnabled(len(self.edit_undo_stack) > 0)
         self.btn_redo.setEnabled(len(self.edit_redo_stack) > 0)
 
+    def clear_edit_mask(self):
+        """Clear the full alpha matte, not the source image or SAM's model cache.
+
+        A single Undo snapshot restores the exact previous alpha (including
+        soft edges). Do not interrupt a running Guided worker or an active
+        brush stroke: either could subsequently overwrite the cleared mask.
+        """
+        if (not self.in_edit_mode or self.current_prediction is None
+                or self.edit_canvas.processing or self.guided_running
+                or self.edit_stroke_active or self.edit_canvas.is_drawing
+                or self.is_guided_thread_running()):
+            return
+
+        alpha = np.asarray(self.current_prediction["final_alpha"])
+        if not np.any(alpha):
+            self.status_label.setText("Mask hiện đã trống (alpha = 0).")
+            return
+
+        # Build first, so a failed disk read does not modify Undo/Redo history.
+        cleared = self.clone_prediction_with_alpha(
+            self.current_prediction, np.zeros_like(alpha, dtype=np.uint8)
+        )
+        self.push_undo_state()  # exactly one Undo step, clears the Redo branch
+        self.current_prediction = cleared
+        self.edit_dirty = True
+        self._manual_last_point = None
+        self.edit_canvas.clear_stroke()
+        self.refresh_edit_canvas()
+        self.update_undo_redo_buttons()
+        self.status_label.setText("Đã xóa toàn bộ mask. Bấm Undo (Ctrl+Z) để khôi phục.")
+        self.refresh_single_layout()
+
     def undo_edit(self):
         if not self.in_edit_mode or not self.current_prediction or not self.edit_undo_stack:
             return
@@ -289,8 +355,39 @@ class SingleEditControllerMixin:
         self.update_undo_redo_buttons()
         self.status_label.setText("Redo mask edit.")
 
+    def on_edit_box_finished(self, box: tuple):
+        """Commit one rectangle as one Undo step; never turn it into a brush stroke."""
+        if (not self.in_edit_mode or not self.current_prediction
+                or self.edit_draw_mode != "box" or self.guided_running
+                or self.is_guided_thread_running()):
+            return
+        h, w = np.asarray(self.current_prediction["final_alpha"]).shape[:2]
+        x0, y0, x1, y1 = (int(v) for v in box)
+        x0, x1 = sorted((max(0, min(w-1, x0)), max(0, min(w-1, x1))))
+        y0, y1 = sorted((max(0, min(h-1, y0)), max(0, min(h-1, y1))))
+        if x1 <= x0 or y1 <= y0:
+            return
+        rect = (x0, y0, x1, y1)  # inclusive coordinates
+        if self.edit_submode == "guided":
+            self.push_undo_state()
+            self.start_guided_edit([], box=rect)
+            return
+
+        original = np.asarray(self.current_prediction["final_alpha"])
+        edited = original.copy()
+        value = 0 if self.edit_operation == "erase" else 255
+        if np.all(edited[y0:y1+1, x0:x1+1] == value):
+            return
+        edited[y0:y1+1, x0:x1+1] = value
+        updated = self.clone_prediction_with_alpha(self.current_prediction, edited)
+        self.push_undo_state()
+        self.current_prediction = updated
+        self.edit_dirty = True
+        self.refresh_edit_canvas()
+        self.status_label.setText(f"Manual Box {self.edit_operation}: ({x0},{y0})–({x1},{y1}).")
+
     def on_edit_stroke_started(self):
-        if not self.current_prediction:
+        if not self.current_prediction or self.edit_draw_mode != "paint":
             return
         self.edit_stroke_active = True
         self.push_undo_state()  # one full alpha snapshot per stroke, NOT per mouse event
@@ -358,7 +455,7 @@ class SingleEditControllerMixin:
         self.edit_canvas.refresh_alpha_region(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
 
     def set_edit_controls_enabled(self, enabled: bool):
-        for btn in [self.btn_erase, self.btn_fit, self.btn_restore, self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save, self.btn_guided, self.btn_manual, self.btn_close_brush]:
+        for btn in [self.btn_erase, self.btn_clear_mask, self.btn_fit, self.btn_restore, self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save, self.btn_guided, self.btn_manual, self.btn_paint_mode, self.btn_box_mode, self.btn_close_brush]:
             btn.setEnabled(enabled)
         self.brush_slider.setEnabled(enabled)
         self.btn_stop_guided.setVisible(not enabled)
@@ -395,7 +492,7 @@ class SingleEditControllerMixin:
             if engine is not None and hasattr(engine, 'release_sam_resources'):
                 engine.release_sam_resources()
 
-    def start_guided_edit(self, points: list):
+    def start_guided_edit(self, points: list, box: tuple | None = None):
         engine = self.engine_getter()
         if engine is None or not self.current_prediction:
             self.edit_canvas.clear_stroke()
@@ -418,30 +515,60 @@ class SingleEditControllerMixin:
             self.guided_timeout_timer.stop()
         QApplication.processEvents()
 
-        self.edit_thread = QThread()
-        self.edit_worker = GuidedEditWorker(
-            engine=engine,
-            image_path=self.current_prediction["input_path"],
-            current_alpha=np.asarray(self.current_prediction["final_alpha"]).copy(),
-            stroke_points=[(float(x), float(y)) for x, y in points],
-            brush_size=int(self.brush_slider.value()),
-            operation=self.edit_operation,
-            sam_checkpoint_path=SAM_CHECKPOINT_PATH,
-            sam_model_type=SAM_MODEL_TYPE,
-            sam_device=getattr(engine, "sam_device", "cpu"),
-        )
-        self.edit_worker.moveToThread(self.edit_thread)
+        # A mismatched worker signal must never lock the canvas in processing state.
+        try:
+            self.edit_thread = QThread()
+            self.edit_worker = GuidedEditWorker(
+                engine=engine,
+                image_path=self.current_prediction["input_path"],
+                current_alpha=np.asarray(self.current_prediction["final_alpha"]).copy(),
+                stroke_points=[(float(x), float(y)) for x, y in points],
+                prompt_box=box,
+                brush_size=int(self.brush_slider.value()),
+                operation=self.edit_operation,
+                sam_checkpoint_path=SAM_CHECKPOINT_PATH,
+                sam_model_type=SAM_MODEL_TYPE,
+                sam_device=getattr(engine, "sam_device", "cpu"),
+            )
+            self.edit_worker.moveToThread(self.edit_thread)
 
-        self.edit_thread.started.connect(self.edit_worker.run)
-        self.edit_worker.finished.connect(self.on_guided_edit_finished)
-        self.edit_worker.canceled.connect(self.on_guided_edit_canceled)
-        self.edit_worker.error.connect(self.on_guided_edit_error)
-        self.edit_worker.finished.connect(self.edit_thread.quit)
-        self.edit_worker.canceled.connect(self.edit_thread.quit)
-        self.edit_worker.error.connect(self.edit_thread.quit)
-        self.edit_thread.finished.connect(self.on_guided_thread_finished_cleanup)
-        self.edit_thread.finished.connect(self.edit_thread.deleteLater)
-        self.edit_thread.start()
+            self.edit_thread.started.connect(self.edit_worker.run)
+            self.edit_worker.finished.connect(self.on_guided_edit_finished)
+            self.edit_worker.progress.connect(self.on_guided_edit_progress)
+            self.edit_worker.canceled.connect(self.on_guided_edit_canceled)
+            self.edit_worker.error.connect(self.on_guided_edit_error)
+            self.edit_worker.finished.connect(self.edit_thread.quit)
+            self.edit_worker.canceled.connect(self.edit_thread.quit)
+            self.edit_worker.error.connect(self.edit_thread.quit)
+            self.edit_thread.finished.connect(self.on_guided_thread_finished_cleanup)
+            self.edit_thread.finished.connect(self.edit_thread.deleteLater)
+            self.edit_thread.start()
+
+        except Exception:
+            # Failure happened before a worker could start. Reset the Edit UI,
+            # preserving mask/pixels and removing this empty Undo snapshot.
+            import traceback
+            err = traceback.format_exc()
+            self.guided_timeout_timer.stop()
+            self.guided_running = False
+            self.guided_ignore_result = False
+            self.edit_canvas.set_processing(False)
+            self.edit_canvas.clear_stroke()
+            self.set_edit_controls_enabled(True)
+            if self.edit_undo_stack:
+                self.edit_undo_stack.pop()
+                self.update_undo_redo_buttons()
+            self.edit_worker = None
+            self.edit_thread = None
+            self.status_label.setText("Không thể khởi động Guided Edit. Có thể thử lại.")
+            QMessageBox.critical(self, "Lỗi khởi động Guided Edit", err)
+
+    def on_guided_edit_progress(self, percentage: int, stage: str):
+        """Queued worker updates; only the main GUI thread paints progress."""
+        if self.guided_ignore_result or not self.guided_running or not self.in_edit_mode:
+            return
+        self.edit_canvas.set_processing_progress(percentage, stage)
+        self.status_label.setText(f"Guided Edit ~{percentage}% — {stage}")
 
     def cancel_guided_edit(self):
         if not self.guided_running and not self.is_guided_thread_running():
@@ -488,6 +615,26 @@ class SingleEditControllerMixin:
             self.edit_canvas.clear_stroke()
             self.set_edit_controls_enabled(True)
             self.status_label.setText("Guided Edit đã trả kết quả sau khi bị dừng, app đã bỏ qua kết quả đó.")
+            return
+
+        # A failed HQ2 point prompt must never stamp the brush's circle as if
+        # it were an inferred object. Keep the image unchanged and make the
+        # reason visible; Manual still provides deliberate pixel-level edits.
+        info = prediction.get("guided_edit_info") or {}
+        if info.get("hq2_selection_failed"):
+            if self.current_prediction is not None:
+                for debug_key in ("hq2_raw_mask_png", "hq2_selected_mask_png"):
+                    if debug_key in prediction:
+                        self.current_prediction[debug_key] = prediction[debug_key]
+            if self.edit_undo_stack:
+                self.edit_undo_stack.pop()
+            self.edit_canvas.set_processing(False)
+            self.edit_canvas.clear_stroke()
+            self.set_edit_controls_enabled(True)
+            self.update_undo_redo_buttons()
+            self.status_label.setText(
+                "HQ2 chưa nhận diện được vật thể tại điểm chấm; mask không thay đổi. "
+                "Hãy thử nét ngắn khác, hoặc dùng Manual để sửa đúng nét cọ.")
             return
 
         # SAM returns a newly built prediction; restore the original inference

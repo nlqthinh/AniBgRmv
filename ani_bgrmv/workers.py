@@ -1,9 +1,9 @@
 from pathlib import Path
+import csv
 import shutil
 import traceback
 
 import numpy as np
-import pandas as pd
 from PySide6.QtCore import QObject, Signal
 
 from bg_engine import BgRemoveEngine
@@ -42,6 +42,7 @@ class SingleCutWorker(QObject):
 
 
 class GuidedEditWorker(QObject):
+    progress = Signal(int, str)
     finished = Signal(dict)
     canceled = Signal()
     error = Signal(str)
@@ -57,6 +58,7 @@ class GuidedEditWorker(QObject):
         sam_checkpoint_path: str,
         sam_model_type: str,
         sam_device: str,
+        prompt_box: tuple[int, int, int, int] | None = None,
     ):
         super().__init__()
         self.engine = engine
@@ -68,6 +70,7 @@ class GuidedEditWorker(QObject):
         self.sam_checkpoint_path = sam_checkpoint_path
         self.sam_model_type = sam_model_type
         self.sam_device = sam_device
+        self.prompt_box = prompt_box
         self.cancel_requested = False
 
     def cancel(self):
@@ -83,6 +86,7 @@ class GuidedEditWorker(QObject):
                 image_path=self.image_path,
                 current_alpha=self.current_alpha,
                 stroke_points=self.stroke_points,
+                prompt_box=self.prompt_box,
                 brush_size=self.brush_size,
                 operation=self.operation,
                 sam_checkpoint_path=self.sam_checkpoint_path,
@@ -92,12 +96,16 @@ class GuidedEditWorker(QObject):
                 # It made edit mode extremely slow on CPU.
                 # Guided edit now uses SAM for local region selection, then applies alpha directly.
                 refine_with_vitmatte=False,
+                # Both Guided Paint and Guided Box share the same stage progress.
+                # This signal is queued to the GUI thread by Qt.
+                progress_callback=self.progress.emit,
             )
 
             if self.cancel_requested:
                 self.canceled.emit()
                 return
 
+            self.progress.emit(100, "Đã hoàn tất")
             self.finished.emit(result)
         except Exception:
             self.error.emit(traceback.format_exc())
@@ -204,7 +212,17 @@ class BatchSaveWorker(QObject):
                 out_dir = Path(self.output_dir)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 log_path = out_dir / "batch_log.csv"
-                pd.DataFrame(logs).to_csv(log_path, index=False, encoding="utf-8-sig")
+                # The batch report does not require pandas. Removing its only
+                # import avoids bundling pandas and optional scientific stacks.
+                # DictWriter preserves the old column insertion order and
+                # handles fields appearing only in later saved predictions.
+                columns = list(dict.fromkeys(key for item in logs for key in item))
+                with log_path.open('w', newline='', encoding='utf-8-sig') as stream:
+                    if columns:
+                        writer = csv.DictWriter(stream, fieldnames=columns,
+                                                extrasaction='ignore')
+                        writer.writeheader()
+                        writer.writerows(logs)
                 self.finished.emit(str(log_path))
             else:
                 # Release-like save: PNG cutouts only; no batch_log.csv.
@@ -213,7 +231,4 @@ class BatchSaveWorker(QObject):
             self.error.emit(traceback.format_exc())
 
 
-# =========================
-# REUSABLE UI COMPONENTS
-# =========================
 

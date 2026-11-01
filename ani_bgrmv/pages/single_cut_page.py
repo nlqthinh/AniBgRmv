@@ -20,6 +20,7 @@ from ..styles import (
     CANCEL_BUTTON_STYLE,
     DEBUG_BUTTON_STYLE,
     EDIT_BLACK_BUTTON_STYLE,
+    EDIT_MODE_BUTTON_STYLE,
     EDIT_ERASE_BUTTON_STYLE,
     EDIT_RESTORE_BUTTON_STYLE,
     apply_button_style,
@@ -47,6 +48,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.edit_start_prediction: dict | None = None
         self.edit_operation = "erase"
         self.edit_submode = "guided"
+        self.edit_draw_mode = "paint"
         self.edit_stroke_active = False
         self.edit_dirty = False
         self.edit_undo_stack: list[np.ndarray] = []
@@ -97,13 +99,22 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.btn_redo = QPushButton("Redo")
         self.btn_guided = QPushButton("Guided")
         self.btn_manual = QPushButton("Manual")
-        for btn in [self.btn_undo, self.btn_redo, self.btn_guided, self.btn_manual]:
+        self.btn_paint_mode = QPushButton("Paint mode")
+        self.btn_box_mode = QPushButton("Box mode")
+        for btn in [self.btn_undo, self.btn_redo]:
             btn.setStyleSheet(EDIT_BLACK_BUTTON_STYLE)
-            btn.setCheckable(btn in [self.btn_guided, self.btn_manual])
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        for btn in [self.btn_guided, self.btn_manual, self.btn_paint_mode, self.btn_box_mode]:
+            btn.setStyleSheet(EDIT_MODE_BUTTON_STYLE)
+            btn.setCheckable(True)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.btn_guided.setChecked(True)
+        self.btn_paint_mode.setChecked(True)
         edit_top.addWidget(self.btn_undo)
         edit_top.addWidget(self.btn_redo)
+        edit_top.addStretch(1)
+        edit_top.addWidget(self.btn_paint_mode)
+        edit_top.addWidget(self.btn_box_mode)
         edit_top.addStretch(1)
         edit_top.addWidget(self.btn_guided)
         edit_top.addWidget(self.btn_manual)
@@ -165,6 +176,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
 
         self.edit_buttons_widget = QWidget()
         self.btn_erase = QPushButton("Erase")
+        self.btn_clear_mask = QPushButton("Clear Mask")
         self.btn_fit = QPushButton("Fit")
         self.btn_restore = QPushButton("Restore")
         self.btn_exit_edit = QPushButton("Exit")
@@ -184,13 +196,15 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.btn_erase.setChecked(True)
 
         self.btn_erase.setStyleSheet(EDIT_ERASE_BUTTON_STYLE)
+        self.btn_clear_mask.setStyleSheet(EDIT_ERASE_BUTTON_STYLE)
+        self.btn_clear_mask.setToolTip("Xóa toàn bộ alpha mask (có thể Undo).")
         self.btn_restore.setStyleSheet(EDIT_RESTORE_BUTTON_STYLE)
         for btn in [self.btn_fit, self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save]:
             btn.setStyleSheet(EDIT_BLACK_BUTTON_STYLE)
         self.btn_stop_guided.setStyleSheet(CANCEL_BUTTON_STYLE)
         self.btn_edit_save.setStyleSheet(EDIT_BLACK_BUTTON_STYLE)
 
-        for btn, width in [(self.btn_erase, 88), (self.btn_fit, 64),
+        for btn, width in [(self.btn_erase, 88), (self.btn_clear_mask, 112), (self.btn_fit, 64),
                            (self.btn_restore, 98), (self.btn_exit_edit, 84),
                            (self.btn_brush_size, 122), (self.btn_edit_save, 104),
                            (self.btn_edit_debug, 112), (self.btn_stop_guided, 84)]:
@@ -202,6 +216,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         edit_buttons_row = center_button_row(
             self.btn_fit,
             self.btn_erase,
+            self.btn_clear_mask,
             self.btn_restore,
             self.btn_exit_edit,
             self.btn_brush_size,
@@ -246,9 +261,12 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.btn_edit.clicked.connect(self.enter_edit_mode)
 
         self.btn_erase.clicked.connect(lambda: self.set_edit_operation("erase"))
+        self.btn_clear_mask.clicked.connect(self.clear_edit_mask)
         self.btn_fit.clicked.connect(self.edit_canvas.reset_view)
         self.btn_restore.clicked.connect(lambda: self.set_edit_operation("restore"))
         self.btn_guided.clicked.connect(lambda: self.set_edit_submode("guided"))
+        self.btn_paint_mode.clicked.connect(lambda: self.set_edit_draw_mode("paint"))
+        self.btn_box_mode.clicked.connect(lambda: self.set_edit_draw_mode("box"))
         self.btn_manual.clicked.connect(lambda: self.set_edit_submode("manual"))
         self.btn_exit_edit.clicked.connect(self.exit_edit_mode_confirm)
         self.btn_brush_size.clicked.connect(self.toggle_brush_slider)
@@ -262,6 +280,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.edit_canvas.strokeStarted.connect(self.on_edit_stroke_started)
         self.edit_canvas.strokePoint.connect(self.on_edit_stroke_point)
         self.edit_canvas.strokeFinished.connect(self.on_edit_stroke_finished)
+        self.edit_canvas.boxFinished.connect(self.on_edit_box_finished)
 
         self.shortcut_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.shortcut_undo.activated.connect(self.undo_edit)

@@ -85,6 +85,11 @@ CPU_SHAPE_OPS = frozenset({
     'Identity',
 })
 CPU_CONDITIONAL_SHAPE_OPS = frozenset({'Equal', 'Mul', 'Where'})
+# HQ3 SAM2.1's exported decoder contains attention-scale calculations that
+# ONNX Runtime may assign to CPU (e.g. Sqrt/Div of a scalar head dimension).
+# This exception is HQ3 DECODER ONLY; no array-valued Sqrt/Div may run on CPU.
+HQ3_SCALAR_ATTENTION_OPS = frozenset({'Sqrt', 'Div'})
+HQ3_ATTENTION_NODE_PREFIX = '/mask_decoder/transformer/'
 # A shape vector containing a few coordinates/dimensions is metadata; a full
 # image/mask/feature-map tensor is NOT. Keep this conservative.
 CPU_SHAPE_MAX_ELEMENTS = 256
@@ -150,6 +155,39 @@ def _is_tiny_metadata_node(event: dict) -> tuple[bool, str]:
     return True, f'input={inputs}, output={outputs}'
 
 
+def _is_hq3_scalar_attention_node(event: dict, part: str) -> tuple[bool, str]:
+    """Permit HQ3 decoder attention scaling on CPU *only* for scalar tensors.
+
+    Important: a node named Div or Sqrt is not automatically harmless. Require
+    the exact HQ3 decoder family, expected attention path AND ORT runtime shape
+    evidence for every operand/result. If shape metadata is missing, fail closed.
+    """
+    args = event.get('args') or {}
+    op = str(args.get('op_name', ''))
+    name = str(event.get('name', ''))
+    if part != 'HQ3 decoder' or op not in HQ3_SCALAR_ATTENTION_OPS:
+        return False, 'not an HQ3 decoder scalar-attention operation'
+    if not name.startswith(HQ3_ATTENTION_NODE_PREFIX):
+        return False, 'outside verified HQ3 transformer attention path'
+    op_name = name.rsplit('/', 1)[-1]
+    if not (op_name == op + '_kernel_time' or
+            (op_name.startswith(op + '_') and op_name.endswith('_kernel_time'))):
+        return False, 'profile node name does not match op_name'
+    inputs = _profile_tensor_shapes(args.get('input_type_shape'))
+    outputs = _profile_tensor_shapes(args.get('output_type_shape'))
+    if not inputs or not outputs:
+        return False, f'missing tensor shape metadata (input={inputs}, output={outputs})'
+    for shape in inputs + outputs:
+        if len(shape) > CPU_SHAPE_MAX_RANK or any(dim < 0 for dim in shape):
+            return False, f'invalid scalar tensor shape={shape}'
+        elements = 1
+        for dim in shape:
+            elements *= dim
+        if elements != 1:
+            return False, f'non-scalar tensor shape={shape}, elements={elements}'
+    return True, f'proven scalar attention scaling: input={inputs}, output={outputs}'
+
+
 def audit_cuda_profile(profile_events: list[dict], part: str) -> dict:
     """Audit *executed* ONNX kernels, not merely listed providers.
 
@@ -189,6 +227,12 @@ def audit_cuda_profile(profile_events: list[dict], part: str) -> dict:
                     allowed_cpu.append(entry)
                 else:
                     rejected.append((op, name, evidence))
+            elif op in HQ3_SCALAR_ATTENTION_OPS:
+                scalar, evidence = _is_hq3_scalar_attention_node(event, part)
+                if scalar:
+                    allowed_cpu.append(entry)
+                else:
+                    rejected.append((op, name, evidence))
             else:
                 rejected.append((op, name, 'not a permitted shape/control operator'))
         else:
@@ -218,6 +262,8 @@ def audit_cuda_profile(profile_events: list[dict], part: str) -> dict:
         'cpu_shape_ops': sorted({op for op, _ in allowed_cpu}),
         'cpu_conditional_shape_nodes': sum(1 for op, _ in allowed_cpu
                                            if op in CPU_CONDITIONAL_SHAPE_OPS),
+        'cpu_hq3_scalar_attention_nodes': sum(1 for op, _ in allowed_cpu
+                                               if op in HQ3_SCALAR_ATTENTION_OPS),
     }
 
 

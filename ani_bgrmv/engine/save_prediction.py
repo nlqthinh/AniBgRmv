@@ -189,4 +189,20 @@ class SavePredictionMixin:
                 prediction["unet_alpha_final_768"],
             )
 
+        # Guided HQ2 diagnostic: raw encoder/decoder output is deliberately
+        # separate from the selected instance and the final M7-edited alpha.
+        # Encoded PNGs avoid retaining additional full-resolution masks in RAM.
+        for field, folder, suffix, result_key in (
+            ("hq2_raw_mask_png", "12_hq2_raw_mask", "hq2_raw_mask", "hq2_raw_mask_path"),
+            ("hq2_selected_mask_png", "13_hq2_selected_instance", "hq2_selected_instance",
+             "hq2_selected_mask_path"),
+        ):
+            encoded = prediction.get(field)
+            if encoded is not None:
+                output_folder = debug_root / folder
+                output_folder.mkdir(parents=True, exist_ok=True)
+                path = output_folder / f"{stem}_{suffix}.png"
+                path.write_bytes(encoded)
+                saved[result_key] = str(path)
+
         return saved

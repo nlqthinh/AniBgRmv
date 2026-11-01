@@ -1,6 +1,8 @@
 from pathlib import Path
 import sys
 import time
+import gc
+import threading
 
 import cv2
 import numpy as np
@@ -37,6 +39,9 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         enforce_trimap_known_regions: bool = False,
         compute_selection: dict | None = None,
     ):
+        # F3/M7 and HQ3/M71 share one engine. Serialize actual inference so
+        # CUDA sessions cannot be freed while another worker is using them.
+        self._inference_lock = threading.RLock()
         self.size = int(size)
         self.enforce_trimap_known_regions = enforce_trimap_known_regions
 
@@ -98,19 +103,33 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
             if "CPUExecutionProvider" not in ort.get_available_providers():
                 raise RuntimeError("ONNX Runtime không có CPUExecutionProvider.")
 
+        # Preserve exactly the original CPU/GPU session settings for lazy
+        # recreation after leaving HQ3 Guided Edit.
+        self._auto_session_options = session_options
+        loading_model, loading_path = "F3", self.f2a1_model_path
         try:
             self.f2_sess = ort.InferenceSession(
                 str(self.f2a1_model_path), sess_options=session_options, providers=self.providers
             )
+            loading_model, loading_path = "ViTMatte/M7", self.m6_model_path
             self.m6_sess = ort.InferenceSession(
                 str(self.m6_model_path), sess_options=session_options, providers=self.providers
             )
         except Exception as exc:
+            # Parsing happens before execution-provider inference. A damaged
+            # ONNX file cannot be fixed by reinstalling CUDA or changing VRAM.
+            reason = str(exc)
+            if "INVALID_PROTOBUF" in reason or "Protobuf parsing failed" in reason:
+                raise RuntimeError(
+                    f"{loading_model} ONNX không đọc được (INVALID_PROTOBUF): {loading_path}. "
+                    "Hãy chạy bat\\diagnose_f3_onnx.bat để xác minh file model, "
+                    "dung lượng và đối chiếu bản trong EXE đã build. "
+                    f"Chi tiết: {exc}"
+                ) from exc
             if self.strict_gpu:
                 raise RuntimeError(
-                    f"F3/ViTMatte không khởi tạo được CUDAExecutionProvider: {exc}. "
-                    "Kiểm tra DLL CUDA/cuDNN tương thích và VRAM còn trống. "
-                    "Không chuyển sang CPU."
+                    f"{loading_model} không khởi tạo được CUDAExecutionProvider: {exc}. "
+                    "Nếu là lỗi GPU/CUDA, hãy kiểm tra DLL và VRAM; không chuyển sang CPU."
                 ) from exc
             raise
         if self.strict_gpu:
@@ -122,21 +141,27 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
             for session in (self.f2_sess, self.m6_sess):
                 if session.get_providers() != ["CPUExecutionProvider"]:
                     raise RuntimeError("CPU mode chỉ được chạy CPUExecutionProvider.")
-        # Validate both SAM ONNX assets even though the heavy SAM sessions are
-        # lazy-loaded when Guided Edit is first used (to conserve GTX 1650 VRAM).
-        from ..app_config import SAM_ENCODER_ONNX_PATH, SAM_DECODER_ONNX_PATH
+        # Validate the selected SAM asset pair before the first Guided stroke.
+        # HQ2 requires public HQ-SAM2 base + fine-tuned decoder-only BEST.
+        from ..app_config import SAM_BACKEND, sam_runtime_assets
+        self.sam_backend = SAM_BACKEND
         if self.strict_gpu or self.cpu_guided_backend == 'sam':
-            for label, path in (("encoder", SAM_ENCODER_ONNX_PATH), ("decoder", SAM_DECODER_ONNX_PATH)):
+            for label, path in sam_runtime_assets():
                 if not Path(path).is_file():
-                    raise FileNotFoundError(f"Không tìm thấy SAM ONNX {label}: {path}")
-        self.runtime_info = (f"GPU {gpu_name} (cuda:{index}) — F3/M7: CUDA, SAM ONNX: CUDA (lazy)"
+                    raise FileNotFoundError(f"Không tìm thấy {label}: {path}")
+        sam_label = ("HQ3 BEST + M71" if SAM_BACKEND in ("hq3_torch", "hq3_onnx")
+                     else "HQ2 BEST + M7" if SAM_BACKEND == "hq2_torch"
+                     else "SAM ViT-B ONNX")
+        self.runtime_info = (f"GPU {gpu_name} (cuda:{index}) — F3/M7: CUDA, {sam_label}: CUDA (lazy)"
                              if self.strict_gpu else
                              ("CPU — F3/M7: ONNX, Guided: GrabCut (nhanh, khác SAM)"
                               if self.cpu_guided_backend == 'grabcut'
-                              else "CPU — F3/M7/SAM ONNX: CPU (lazy)"))
+                              else f"CPU — F3/M7 ONNX, {sam_label}: CPU (lazy)"))
 
         self.f2_input_name = self.f2_sess.get_inputs()[0].name
         self.m6_input_name = self.m6_sess.get_inputs()[0].name
+        self._m71_sess = None  # Lazy: M71 is only used in HQ3 Guided Edit
+        self._m71_input_name = None
 
 
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -171,6 +196,98 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         # Kept for compatibility with callers. The engine now chooses an
         # explicit provider inside __init__ based on the saved compute mode.
         return ["CPUExecutionProvider"]
+
+    def log_sam_vram(self, stage: str) -> None:
+        """Optional snapshots: *total device* VRAM + PyTorch allocator stats.
+
+        ONNX Runtime allocations are included in total used memory, but NOT in
+        torch.cuda.memory_allocated(). Samples are not true instantaneous
+        kernel peaks; measure a full peak with nvidia-smi/Task Manager too.
+        """
+        from ..app_config import APP_CONFIG
+        if not self.strict_gpu or not APP_CONFIG.get('sam', {}).get('sam_vram_diagnostics', True):
+            return
+        try:
+            import torch
+            idx = int(self.sam_device.split(':', 1)[1])
+            if not torch.cuda.is_available():
+                return
+            free, total = torch.cuda.mem_get_info(idx)
+            mb = 1024 * 1024
+            allocated = torch.cuda.memory_allocated(idx) / mb
+            reserved = torch.cuda.memory_reserved(idx) / mb
+            peak = torch.cuda.max_memory_allocated(idx) / mb
+            print(f'[AniBgRmv VRAM] {stage}: device={(total-free)/mb:.0f}/{total/mb:.0f} MiB, '
+                  f'free={free/mb:.0f} MiB, torch_alloc={allocated:.0f} MiB, '
+                  f'torch_reserved={reserved:.0f} MiB, torch_peak_alloc={peak:.0f} MiB',
+                  flush=True)
+        except Exception as exc:
+            # Diagnostics must never block actual user edits.
+            print(f'[AniBgRmv VRAM] diagnostics unavailable ({stage}): {exc}', flush=True)
+
+    def _release_auto_sessions_for_hq3(self) -> None:
+        """During HQ3 Guided GPU inference, F3/M7 are dead weight in VRAM.
+
+        Edit manipulates the already computed alpha; no F3/M7 inference is
+        needed until a *new* Single/Batch cut. Only GPU+HQ3 uses this path.
+        The RLock also protects against concurrent Single/Batch inference.
+        """
+        from ..app_config import APP_CONFIG
+        if (not self.strict_gpu or self.sam_backend not in ('hq3_torch', 'hq3_onnx') or
+                not APP_CONFIG.get('sam', {}).get('hq3_unload_f3_m7_during_guided', True)):
+            return
+        with self._inference_lock:
+            if self.f2_sess is None and self.m6_sess is None:
+                return
+            self.f2_sess = None
+            self.m6_sess = None
+            # get_inputs() name strings remain valid after release.
+            gc.collect()
+            self.log_sam_vram('after F3/M7 session unload, before HQ3 load')
+
+    def _ensure_auto_sessions(self) -> None:
+        """Lazily restore BOTH automatic models when F3->M7 is needed again.
+
+        An exception must not leave a partially initialized model pair alive;
+        strict CUDA validation and no-fallback contract are preserved.
+        """
+        with self._inference_lock:
+            if self.f2_sess is not None and self.m6_sess is not None:
+                return
+            # A partial pair should never be used.
+            self.f2_sess = None
+            self.m6_sess = None
+            f3 = m7 = None
+            try:
+                f3 = ort.InferenceSession(
+                    str(self.f2a1_model_path), sess_options=self._auto_session_options,
+                    providers=self.providers)
+                m7 = ort.InferenceSession(
+                    str(self.m6_model_path), sess_options=self._auto_session_options,
+                    providers=self.providers)
+                if self.strict_gpu:
+                    for name, session in (('F3', f3), ('M7', m7)):
+                        if not session.get_providers() or session.get_providers()[0] != 'CUDAExecutionProvider':
+                            raise RuntimeError(f'{name} không chạy CUDA; không fallback CPU.')
+                        session.disable_fallback()
+                else:
+                    for session in (f3, m7):
+                        if session.get_providers() != ['CPUExecutionProvider']:
+                            raise RuntimeError('F3/M7 phải chạy CPUExecutionProvider ở CPU mode.')
+                self.f2_input_name = f3.get_inputs()[0].name
+                self.m6_input_name = m7.get_inputs()[0].name
+                self.f2_sess, self.m6_sess = f3, m7
+                self.log_sam_vram('after F3/M7 reload')
+            except Exception:
+                f3 = m7 = None
+                self.f2_sess = self.m6_sess = None
+                gc.collect()
+                raise
+
+    def apply_sam_guided_edit(self, *args, **kwargs):
+        # The actual Guided implementation stays in SamGuidedEditMixin.
+        with self._inference_lock:
+            return super().apply_sam_guided_edit(*args, **kwargs)
 
     def _array_stats(self, x: np.ndarray, valid_mask: np.ndarray | None = None) -> dict:
         values = np.asarray(x, dtype=np.float32)
@@ -491,6 +608,7 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         return arr[None, :, :, :].astype(np.float32)
 
     def _predict_f3_raw_letterbox(self, image_letterbox_pil: Image.Image) -> np.ndarray:
+        self._ensure_auto_sessions()
         x = self._preprocess_unet_letterbox(image_letterbox_pil)
         y = self.f2_sess.run(None, {self.f2_input_name: x})[0]
         y = np.asarray(y)
@@ -593,6 +711,7 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
         return x[None, :, :, :].astype(np.float32)
 
     def _predict_m7_alpha_letterbox(self, image_letterbox_pil: Image.Image, trimap_768: np.ndarray) -> np.ndarray:
+        self._ensure_auto_sessions()
         x = self._preprocess_vitmatte_letterbox(image_letterbox_pil, trimap_768)
         y = self.m6_sess.run(None, {self.m6_input_name: x})[0]
         y = np.asarray(y)
@@ -606,7 +725,147 @@ class BgRemoveEngine(SamGuidedEditMixin, SavePredictionMixin):
 
         return self._clip_vitmatte_alpha(y)
 
+    def _prepare_hq3_memory_for_m71(self) -> None:
+        """Hand unused PyTorch CUDA blocks to ONNX Runtime on GPUs <= 5 GiB.
+
+        SAM2 model weights and the live full-image embedding remain allocated.
+        This operates only *between* finished HQ3 calls and the M71 call,
+        never while a tensor/kernel is being consumed by HQ3. The inference
+        RLock serializes M71 with all other engine entrypoints.
+        """
+        from ..app_config import APP_CONFIG
+        opts = APP_CONFIG.get('sam', {})
+        if not (self.strict_gpu and self.sam_backend == 'hq3_torch'
+                and opts.get('hq3_trim_torch_before_m71', True)):
+            return
+        try:
+            import torch
+            device_index = int(self.sam_device.split(':', 1)[1])
+            if not torch.cuda.is_available():
+                return
+            free, total = torch.cuda.mem_get_info(device_index)
+            if total > 5 * 1024**3:
+                return  # avoid adding costly cache flushes on large GPUs
+            unused = max(0, torch.cuda.memory_reserved(device_index) -
+                         torch.cuda.memory_allocated(device_index))
+            threshold_mib = max(128, int(opts.get('hq3_trim_torch_min_reclaim_mib', 256)))
+            if unused < threshold_mib * 1024**2:
+                return
+            self.log_sam_vram('before HQ3 -> M71 PyTorch cache trim')
+            trim_started = time.perf_counter()
+            # The HQ3 predictor already returned its masks to host; waiting
+            # for any outstanding CUDA work makes allocator handoff explicit.
+            torch.cuda.synchronize(device_index)
+            torch.cuda.empty_cache()  # cannot free live HQ3 weights/features
+            self.log_sam_vram('after HQ3 -> M71 PyTorch cache trim')
+            if opts.get('sam_vram_diagnostics', True):
+                print(f'[AniBgRmv VRAM] HQ3 cache trim elapsed_ms='
+                      f'{(time.perf_counter()-trim_started)*1000:.1f}', flush=True)
+        except (ImportError, RuntimeError, ValueError, TypeError) as exc:
+            # A memory optimization must not change whether inference works.
+            if opts.get('sam_vram_diagnostics', True):
+                print(f'[AniBgRmv VRAM] optional PyTorch cache trim skipped: {exc}', flush=True)
+
+    def _m71_gpu_run_options(self):
+        """Return ORT CUDA arena shrink RunOptions on a small NVIDIA GPU.
+
+        ONNX Runtime's documented key shrinks unused arena allocations AFTER
+        Run(), not the temporary tensors needed during inference. The option
+        never lowers precision or changes the ViTMatte weights/input.
+        """
+        from ..app_config import APP_CONFIG
+        if (not self.strict_gpu or
+                not APP_CONFIG.get('sam', {}).get('m71_shrink_gpu_arena_after_run', True)):
+            return None
+        try:
+            idx = int(self.sam_device.split(':', 1)[1])
+            if self.sam_backend != 'hq3_onnx':
+                # Existing HQ3 PyTorch behavior: auto-enable for <=5 GiB only.
+                import torch
+                if not torch.cuda.is_available():
+                    return None
+                _free, total = torch.cuda.mem_get_info(idx)
+                if total > 5 * 1024**3:
+                    return None
+            # HQ3 ONNX-only EXE deliberately does not include PyTorch. Reuse
+            # the already-enabled low-memory option without importing it.
+        except (ImportError, RuntimeError, ValueError, TypeError):
+            return None
+        opt = ort.RunOptions()
+        opt.add_run_config_entry('memory.enable_memory_arena_shrinkage', f'gpu:{idx}')
+        return opt
+
+    def _predict_m71_alpha_letterbox(self, image_letterbox_pil: Image.Image,
+                                     trimap_768: np.ndarray) -> np.ndarray:
+        """HQ3 Guided Edit only. F3 -> M7 still uses self.m6_sess unchanged.
+
+        M71 has the same 4-channel, 768x768 ViTMatte I/O contract as M7.
+        Its ONNX session is instantiated only for the first HQ3 Guided action.
+        """
+        # HQ3 inference is finished; return *unused* torch blocks before ORT
+        # creates its CUDA session or requests ViTMatte workspaces.
+        self._prepare_hq3_memory_for_m71()
+        if self._m71_sess is None:
+            from ..app_config import M71_ONNX_PATH
+            model_path = self._resolve_asset_path(M71_ONNX_PATH)
+            if not model_path.is_file():
+                raise FileNotFoundError(
+                    f"Thiếu M71 ONNX: {model_path}. "
+                    "Hãy đặt m71_hq3_d0d_best.pt vào ani_bgrmv/models, "
+                    "rồi nhấp đúp bat/prepare_m71_onnx.bat trước khi mở app.py."
+                )
+            if self.strict_gpu:
+                sess_opts = ort.SessionOptions()
+                sess_opts.enable_cpu_mem_arena = False
+                sess_opts.enable_mem_pattern = False
+                sess_opts.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+            else:
+                from ..cpu_optimizations import cpu_session_options
+                sess_opts = cpu_session_options()
+            session = ort.InferenceSession(
+                str(model_path), sess_options=sess_opts, providers=self.providers)
+            if self.strict_gpu:
+                if session.get_providers()[0] != "CUDAExecutionProvider":
+                    raise RuntimeError("M71 không chạy CUDAExecutionProvider; cấm fallback CPU.")
+                session.disable_fallback()
+            elif session.get_providers() != ["CPUExecutionProvider"]:
+                raise RuntimeError("M71 CPU phải dùng CPUExecutionProvider.")
+            model_input = session.get_inputs()
+            model_output = session.get_outputs()
+            if len(model_input) != 1 or len(model_output) != 1 or \
+                    model_input[0].type != "tensor(float)" or \
+                    model_input[0].shape != [1, 4, self.size, self.size]:
+                raise RuntimeError("M71 ONNX sai contract; cần input float32 [1,4,768,768].")
+            self._m71_input_name = model_input[0].name
+            self._m71_sess = session
+            self.log_sam_vram('after M71 ONNX session load')
+
+        x = self._preprocess_vitmatte_letterbox(image_letterbox_pil, trimap_768)
+        run_options = self._m71_gpu_run_options()
+        m71_started = time.perf_counter()
+        # Keep standard run() signature when arena shrinkage is disabled,
+        # including CPU Lite and configurations needing older ORT behavior.
+        if run_options is None:
+            output = self._m71_sess.run(None, {self._m71_input_name: x})
+        else:
+            output = self._m71_sess.run(None, {self._m71_input_name: x}, run_options)
+        y = np.asarray(output[0])
+        self.log_sam_vram('after M71 ONNX inference (optional arena shrink)')
+        from ..app_config import APP_CONFIG
+        if self.strict_gpu and APP_CONFIG.get('sam', {}).get('sam_vram_diagnostics', True):
+            print(f'[AniBgRmv VRAM] M71 onnx_run_ms='
+                  f'{(time.perf_counter()-m71_started)*1000:.1f}; '
+                  f'arena_shrink={run_options is not None}', flush=True)
+        if y.ndim != 4 or y.shape != (1, 1, self.size, self.size):
+            raise RuntimeError(f"M71 ONNX output sai shape: {y.shape}, cần [1,1,768,768].")
+        return self._clip_vitmatte_alpha(y[0, 0])
+
     def predict_alpha(self, image_path: str, include_debug: bool = True) -> dict:
+        with self._inference_lock:
+            return self._predict_alpha_locked(image_path, include_debug=include_debug)
+
+    def _predict_alpha_locked(self, image_path: str, include_debug: bool = True) -> dict:
+        self._ensure_auto_sessions()
         image_pil = Image.open(image_path).convert("RGB")
 
         image_letterbox_pil, valid_mask_768, meta = self._letterbox_rgb_for_m7(image_pil)

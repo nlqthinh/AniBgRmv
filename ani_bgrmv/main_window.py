@@ -11,6 +11,7 @@ from .pages.batch_cut_page import BatchCutPage
 from .pages.compute_status_page import ComputeStatusPage
 from .pages.home_page import HomePage
 from .pages.single_cut_page import SingleCutPage
+from .pages.video_cut_page import VideoCutPage
 
 
 class ModelLoadWorker(QObject):
@@ -60,14 +61,16 @@ class MainWindow(QWidget):
         self.home_page = HomePage()
         self.single_page = SingleCutPage(self.get_engine)
         self.batch_page = BatchCutPage(self.get_engine)
+        self.video_page = VideoCutPage(self.get_engine)
         self.compute_page = ComputeStatusPage()
         # M49: stable page selectors for dark backgrounds, independent of OS theme.
         self.home_page.setObjectName("AniBgRmvHomePage")
         self.single_page.setObjectName("AniBgRmvSinglePage")
         self.batch_page.setObjectName("AniBgRmvBatchPage")
         self.compute_page.setObjectName("AniBgRmvComputePage")
+        self.video_page.setObjectName("AniBgRmvVideoPage")
 
-        for page in (self.home_page, self.single_page, self.batch_page, self.compute_page):
+        for page in (self.home_page, self.single_page, self.batch_page, self.video_page, self.compute_page):
             self.stack.addWidget(page)
 
         layout = QVBoxLayout()
@@ -77,9 +80,11 @@ class MainWindow(QWidget):
 
         self.home_page.singleRequested.connect(lambda: self.stack.setCurrentWidget(self.single_page))
         self.home_page.batchRequested.connect(lambda: self.stack.setCurrentWidget(self.batch_page))
+        self.home_page.videoRequested.connect(lambda: self.stack.setCurrentWidget(self.video_page))
         self.home_page.computeRequested.connect(self.open_compute_page)
         self.single_page.backRequested.connect(lambda: self.stack.setCurrentWidget(self.home_page))
         self.batch_page.backRequested.connect(lambda: self.stack.setCurrentWidget(self.home_page))
+        self.video_page.backRequested.connect(lambda: self.stack.setCurrentWidget(self.home_page))
         self.compute_page.backRequested.connect(lambda: self.stack.setCurrentWidget(self.home_page))
         self.compute_page.selectionRequested.connect(self.change_compute)
 
@@ -92,6 +97,7 @@ class MainWindow(QWidget):
     def set_pages_enabled(self, enabled: bool):
         self.home_page.btn_single.setEnabled(enabled)
         self.home_page.btn_batch.setEnabled(enabled)
+        self.home_page.btn_video.setEnabled(enabled)
 
     def open_compute_page(self):
         self.compute_page.set_selection(self.selection)
@@ -105,6 +111,9 @@ class MainWindow(QWidget):
         self.stack.setCurrentWidget(self.compute_page)
 
     def change_compute(self, selection):
+        if self.video_page.is_busy:
+            QMessageBox.warning(self, "Đang xử lý video", "Dừng tác vụ video trước khi đổi CPU/GPU.")
+            return
         if self.load_thread is not None:
             return
         try:
@@ -177,6 +186,10 @@ class MainWindow(QWidget):
         self.compute_page.set_applying(False)
 
     def closeEvent(self, event):
+        if self.video_page.is_busy:
+            QMessageBox.information(self, "Đang xử lý video", "Bấm Dừng rồi chờ kết thúc tác vụ video trước khi đóng app.")
+            event.ignore()
+            return
         if self.load_thread is not None and self.load_thread.isRunning():
             QMessageBox.information(self, "Đang nạp model", "Vui lòng chờ hoàn tất nạp model trước khi thoát.")
             event.ignore()
@@ -186,4 +199,5 @@ class MainWindow(QWidget):
             QMessageBox.information(self, "Đang tìm GPU", "Đã yêu cầu dừng GPU Check. Vui lòng chờ trước khi thoát.")
             event.ignore()
             return
+        self.video_page.shutdown()
         super().closeEvent(event)

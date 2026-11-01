@@ -207,3 +207,14 @@ def apply_fixed_dark_theme(app: QApplication) -> None:
         }
     """)
 
+
+
+# M73: Selected Guided/Manual and Paint/Box toggles are blue on dark UI.
+EDIT_MODE_BUTTON_STYLE = EDIT_BLACK_BUTTON_STYLE + """
+QPushButton:checked {
+    border: 2px solid #3299FF;
+    color: #3299FF;
+    background: #071827;
+}
+QPushButton:checked:hover { border-color: #60B4FF; color: #60B4FF; }
+"""

@@ -7,6 +7,7 @@ class HomePage(QWidget):
     singleRequested = Signal()
     batchRequested = Signal()
     computeRequested = Signal()
+    videoRequested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -21,7 +22,7 @@ class HomePage(QWidget):
 
         self.btn_single = QPushButton("Cắt nền 1 hình")
         self.btn_batch = QPushButton("Cắt nhiều hình")
-        self.btn_video = QPushButton("Cắt video (sau)")
+        self.btn_video = QPushButton("Cắt video")
         self.btn_object = QPushButton("Xóa vật thể (sau)")
         self.btn_compute = QPushButton("Trạng thái CPU/GPU")
 
@@ -29,7 +30,6 @@ class HomePage(QWidget):
             btn.setMinimumWidth(260)
             apply_button_style(btn)
 
-        self.btn_video.setEnabled(False)
         self.btn_object.setEnabled(False)
 
         box = QVBoxLayout()
@@ -52,5 +52,6 @@ class HomePage(QWidget):
 
         self.btn_single.clicked.connect(self.singleRequested.emit)
         self.btn_batch.clicked.connect(self.batchRequested.emit)
+        self.btn_video.clicked.connect(self.videoRequested.emit)
         self.btn_compute.clicked.connect(self.computeRequested.emit)
 
