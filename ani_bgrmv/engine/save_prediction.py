@@ -3,206 +3,99 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+# (prediction key, debug subfolder, file suffix). Written only when present:
+# an edited or lightweight prediction never gets fabricated intermediates.
+DEBUG_IMAGES = (
+    ("final_alpha", "01_final_alpha", "final_alpha"),
+    ("unet_raw_output_768", "02_unet_raw_output_768", "unet_raw_output_768"),
+    ("unet_alpha_before_fix_768", "03_unet_alpha_before_fix_768", "unet_alpha_before_fix_768"),
+    ("unet_alpha_768", "04_unet_alpha_for_trimap_768", "unet_alpha_for_trimap_768"),
+    ("unet_alpha_original", "05_unet_alpha_original", "unet_alpha_original"),
+    ("trimap_768", "06_trimap_768", "trimap_768"),
+    ("matte_raw_alpha_768", "07_vitmatte_unet_raw_alpha_768", "vitmatte_unet_raw_alpha_768"),
+    ("matte_alpha_768", "08_vitmatte_unet_alpha_768", "vitmatte_unet_alpha_768"),
+    ("valid_mask_768", "09_valid_mask_768", "valid_mask_768"),
+    ("image_letterbox_pil", "10_image_letterbox_768", "image_letterbox_768"),
+)
+# Guided Edit diagnostics, kept as encoded PNG bytes (no extra full-size arrays).
+DEBUG_PNG_BYTES = (
+    ("sam_raw_mask_png", "11_sam_raw_mask", "sam_raw_mask"),
+    ("sam_selected_mask_png", "12_sam_selected_instance", "sam_selected_instance"),
+)
+
 
 class SavePredictionMixin:
     def _unique_path(self, folder: Path, filename: str) -> Path:
         folder.mkdir(parents=True, exist_ok=True)
-
         candidate = folder / filename
         if not candidate.exists():
             return candidate
-
-        stem = candidate.stem
-        suffix = candidate.suffix
-
         idx = 2
         while True:
-            p = folder / f"{stem}_{idx}{suffix}"
+            p = folder / f"{candidate.stem}_{idx}{candidate.suffix}"
             if not p.exists():
                 return p
             idx += 1
 
     def optimize_cutout_png(self, cutout_pil: Image.Image) -> Image.Image:
-        rgba = cutout_pil.convert("RGBA")
-        arr = np.asarray(rgba).copy()
-
-        alpha = arr[:, :, 3]
-        transparent = alpha == 0
-
-        arr[transparent, 0] = 0
-        arr[transparent, 1] = 0
-        arr[transparent, 2] = 0
-
+        """Zero the RGB of fully transparent pixels: smaller PNG, same image."""
+        arr = np.asarray(cutout_pil.convert("RGBA")).copy()
+        arr[arr[:, :, 3] == 0, :3] = 0
         return Image.fromarray(arr, mode="RGBA")
 
-    def _write_debug_png(self, folder: Path, filename: str, data) -> str:
-        """Debug files overwrite by name to avoid stale masks when testing."""
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / filename
-
-        if isinstance(data, Image.Image):
-            data.save(path, optimize=True, compress_level=9)
-        else:
-            Image.fromarray(np.asarray(data).astype(np.uint8)).save(path, optimize=True, compress_level=9)
-
-        return str(path)
-
     def save_prediction(self, prediction: dict, output_dir: str, save_debug: bool = True) -> dict:
-        """
-        Save final cutout and optional debug images when the user clicks Save.
-        """
+        """Save the cutout, plus previews and debug images when save_debug is on."""
         input_path = Path(prediction["input_path"])
         output_dir = Path(output_dir)
         stem = input_path.stem
 
-        cutout_dir = output_dir / "01_cutouts"
-        cutout_path = self._unique_path(cutout_dir, f"{stem}_cutout.png")
-        cutout_optimized = self.optimize_cutout_png(prediction["cutout_pil"])
-        cutout_optimized.save(cutout_path, format="PNG", optimize=True, compress_level=9)
-
-        # With Debug OFF, do not create preview/debug folders or write any
-        # intermediate files. Leave existing files from older saves untouched.
+        cutout_path = self._unique_path(output_dir / "01_cutouts", f"{stem}_cutout.png")
+        self.optimize_cutout_png(prediction["cutout_pil"]).save(
+            cutout_path, format="PNG", optimize=True, compress_level=9)
         saved = {
             "input_path": str(input_path),
             "cutout_path": str(cutout_path),
-            "elapsed_sec": prediction.get("elapsed_sec", None),
+            "elapsed_sec": prediction.get("elapsed_sec"),
             "trimap_stats": prediction.get("trimap_stats", {}),
-            "alpha_fix_stats": prediction.get("alpha_fix_stats", {}),
-            "vitmatte_edge_stats": prediction.get("vitmatte_edge_stats", {}),
             "trimap_stats_valid": prediction.get("trimap_stats_valid", {}),
-            "f3_letterbox_meta": prediction.get("f3_letterbox_meta", {}),
+            "alpha_fix_stats": prediction.get("alpha_fix_stats", {}),
+            "letterbox_meta": prediction.get("letterbox_meta", {}),
             "safety_notes": ";".join(prediction.get("safety_notes", [])),
         }
-
         if not save_debug:
             return saved
 
-        # Debug ON retains the previous saving behavior.
-        preview_checker_dir = output_dir / "02_preview_checker"
-        preview_white_dir = output_dir / "03_preview_white"
-        preview_checker_path = self._unique_path(preview_checker_dir, f"{stem}_preview_checker.jpg")
-        preview_white_path = self._unique_path(preview_white_dir, f"{stem}_preview_white.jpg")
-        # Edited predictions are lightweight; compute the two debug-only
-        # previews on demand instead of keeping both RGB copies in RAM.
-        checker_preview = prediction.get('preview_checker_pil')
-        white_preview = prediction.get('preview_white_pil')
-        if checker_preview is None:
-            checker_preview = self.make_preview_checker(prediction['cutout_pil'])
-        if white_preview is None:
-            white_preview = self.make_preview_white(prediction['cutout_pil'])
-        checker_preview.save(preview_checker_path, quality=95, optimize=True)
-        white_preview.save(preview_white_path, quality=95, optimize=True)
-        saved["preview_checker_path"] = str(preview_checker_path)
-        saved["preview_white_path"] = str(preview_white_path)
+        # Edited predictions are lightweight: build previews only when saving.
+        checker = prediction.get("preview_checker_pil")
+        if checker is None:
+            checker = self.make_preview_checker(prediction["cutout_pil"])
+        white = prediction.get("preview_white_pil")
+        if white is None:
+            white = self.make_preview_white(prediction["cutout_pil"])
+        checker_path = self._unique_path(output_dir / "02_preview_checker", f"{stem}_preview_checker.jpg")
+        white_path = self._unique_path(output_dir / "03_preview_white", f"{stem}_preview_white.jpg")
+        checker.save(checker_path, quality=95, optimize=True)
+        white.save(white_path, quality=95, optimize=True)
+        saved["preview_checker_path"] = str(checker_path)
+        saved["preview_white_path"] = str(white_path)
 
+        # Debug files overwrite by name to avoid stale masks when testing.
         debug_root = output_dir / "99_debug"
-
-        # Single and Batch both call this method. Create the full shared debug
-        # layout, even if an optional intermediate is unavailable in an edited
-        # prediction. Never fabricate an image for a missing intermediate.
-        debug_subfolders = (
-            "01_final_alpha_used_for_cutout",
-            "02_f3_raw_output_letterbox_768_debug",
-            "03_f3_auto_alpha_before_fix_letterbox_768",
-            "04_f3_auto_alpha_used_for_trimap_letterbox_768",
-            "05_f3_auto_alpha_original_preview",
-            "06_m7_loose_trimap_letterbox_768",
-            "07_vitmatte_m7_raw_alpha_letterbox_768",
-            "08_vitmatte_m7_alpha_used_letterbox_768",
-            "09_valid_mask_letterbox_768",
-            "10_image_letterbox_768",
-            "11_final_alpha_letterbox_768_before_crop",
-        )
-        for subfolder in debug_subfolders:
-            (debug_root / subfolder).mkdir(parents=True, exist_ok=True)
-
-        saved["final_alpha_path"] = self._write_debug_png(
-            debug_root / "01_final_alpha_used_for_cutout",
-            f"{stem}_final_alpha_used_for_cutout.png",
-            prediction["final_alpha"],
-        )
-
-        if prediction.get("f3_raw_output_letterbox_debug") is not None:
-            saved["f3_raw_output_letterbox_path"] = self._write_debug_png(
-                debug_root / "02_f3_raw_output_letterbox_768_debug",
-                f"{stem}_f3_raw_output_letterbox_768_debug.png",
-                prediction["f3_raw_output_letterbox_debug"],
-            )
-
-        if prediction.get("f3_auto_alpha_before_fix_768") is not None:
-            saved["f3_auto_alpha_before_fix_path"] = self._write_debug_png(
-                debug_root / "03_f3_auto_alpha_before_fix_letterbox_768",
-                f"{stem}_f3_auto_alpha_before_fix_letterbox_768.png",
-                prediction["f3_auto_alpha_before_fix_768"],
-            )
-
-        saved["f3_auto_alpha_used_letterbox_path"] = self._write_debug_png(
-            debug_root / "04_f3_auto_alpha_used_for_trimap_letterbox_768",
-            f"{stem}_f3_auto_alpha_used_for_trimap_letterbox_768.png",
-            prediction["f2_alpha_768"],
-        )
-
-        if prediction.get("unet_alpha_original") is not None:
-            saved["f3_auto_alpha_original_preview_path"] = self._write_debug_png(
-                debug_root / "05_f3_auto_alpha_original_preview",
-                f"{stem}_f3_auto_alpha_original_preview.png",
-                prediction["unet_alpha_original"],
-            )
-
-        saved["trimap_letterbox_path"] = self._write_debug_png(
-            debug_root / "06_m7_loose_trimap_letterbox_768",
-            f"{stem}_m7_loose_trimap_letterbox_768.png",
-            prediction["trimap_768"],
-        )
-
-        if prediction.get("m6_raw_alpha_768") is not None:
-            saved["vitmatte_m7_raw_alpha_letterbox_path"] = self._write_debug_png(
-                debug_root / "07_vitmatte_m7_raw_alpha_letterbox_768",
-                f"{stem}_vitmatte_m7_raw_alpha_letterbox_768.png",
-                prediction["m6_raw_alpha_768"],
-            )
-
-        saved["vitmatte_m7_alpha_used_letterbox_path"] = self._write_debug_png(
-            debug_root / "08_vitmatte_m7_alpha_used_letterbox_768",
-            f"{stem}_vitmatte_m7_alpha_used_letterbox_768.png",
-            prediction["m6_alpha_768"],
-        )
-
-        if prediction.get("valid_mask_768") is not None:
-            saved["valid_mask_letterbox_path"] = self._write_debug_png(
-                debug_root / "09_valid_mask_letterbox_768",
-                f"{stem}_valid_mask_letterbox_768.png",
-                prediction["valid_mask_768"],
-            )
-
-        if prediction.get("image_letterbox_pil") is not None:
-            saved["image_letterbox_path"] = self._write_debug_png(
-                debug_root / "10_image_letterbox_768",
-                f"{stem}_image_letterbox_768.png",
-                prediction["image_letterbox_pil"],
-            )
-
-        if prediction.get("unet_alpha_final_768") is not None:
-            saved["final_alpha_letterbox_path"] = self._write_debug_png(
-                debug_root / "11_final_alpha_letterbox_768_before_crop",
-                f"{stem}_final_alpha_letterbox_768_before_crop.png",
-                prediction["unet_alpha_final_768"],
-            )
-
-        # Guided HQ2 diagnostic: raw encoder/decoder output is deliberately
-        # separate from the selected instance and the final M7-edited alpha.
-        # Encoded PNGs avoid retaining additional full-resolution masks in RAM.
-        for field, folder, suffix, result_key in (
-            ("hq2_raw_mask_png", "12_hq2_raw_mask", "hq2_raw_mask", "hq2_raw_mask_path"),
-            ("hq2_selected_mask_png", "13_hq2_selected_instance", "hq2_selected_instance",
-             "hq2_selected_mask_path"),
-        ):
-            encoded = prediction.get(field)
-            if encoded is not None:
-                output_folder = debug_root / folder
-                output_folder.mkdir(parents=True, exist_ok=True)
-                path = output_folder / f"{stem}_{suffix}.png"
-                path.write_bytes(encoded)
-                saved[result_key] = str(path)
-
+        for key, folder, suffix in DEBUG_IMAGES:
+            data = prediction.get(key)
+            if data is None:
+                continue
+            (debug_root / folder).mkdir(parents=True, exist_ok=True)
+            path = debug_root / folder / f"{stem}_{suffix}.png"
+            image = data if isinstance(data, Image.Image) else Image.fromarray(np.asarray(data).astype(np.uint8))
+            image.save(path, optimize=True, compress_level=9)
+            saved[f"{suffix}_path"] = str(path)
+        for key, folder, suffix in DEBUG_PNG_BYTES:
+            encoded = prediction.get(key)
+            if encoded is None:
+                continue
+            (debug_root / folder).mkdir(parents=True, exist_ok=True)
+            path = debug_root / folder / f"{stem}_{suffix}.png"
+            path.write_bytes(encoded)
+            saved[f"{suffix}_path"] = str(path)
         return saved

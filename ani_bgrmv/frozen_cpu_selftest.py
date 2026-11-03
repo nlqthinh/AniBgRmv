@@ -1,4 +1,4 @@
-"""CPU Lite post-build smoke test: real F3 and M7 ONNX in frozen process."""
+"""CPU edition post-build smoke test: real UNet and ViTMatte-UNet ONNX in the frozen EXE."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ import traceback
 
 
 def _report_path() -> Path:
-    return Path(sys.executable).resolve().parent / 'cpu_f3_m7_selftest.json'
+    return Path(sys.executable).resolve().parent / 'cpu_selftest.json'
 
 
 def _test_impl() -> dict:
@@ -21,8 +21,8 @@ def _test_impl() -> dict:
     opts.inter_op_num_threads = 1
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     outputs = {}
-    for label, key, channels in (('F3','unet_onnx_path',3),
-                                  ('M7','vitmatte_onnx_path',4)):
+    for label, key, channels in (('UNet','unet_onnx_path',3),
+                                  ('ViTMatte-UNet','vitmatte_unet_onnx_path',4)):
         model = root/cfg['model'][key]
         if not model.is_file():
             raise FileNotFoundError(f'{label}: bundled model missing: {model}')
@@ -54,7 +54,7 @@ def main() -> int:
     try:
         _report_path().write_text(json.dumps(record,indent=2,ensure_ascii=False),encoding='utf-8')
     except OSError as exc:
-        print(f'[M79 FAIL] Cannot write CPU smoke result: {exc}',file=sys.stderr)
+        print(f'[FAIL] Cannot write CPU smoke result: {exc}',file=sys.stderr)
         return 1
-    print(f"[M79 {record['status']}] Frozen F3+M7 CPU selftest", flush=True)
+    print(f"[{record['status']}] Frozen UNet + ViTMatte-UNet CPU selftest", flush=True)
     return status

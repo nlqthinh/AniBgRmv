@@ -1,0 +1,21 @@
+{
+  "version": "M87",
+  "status": "CANCELLED",
+  "action": "track",
+  "clip": {
+    "name": "fake.mp4",
+    "frames": 5,
+    "proxy_hw": [
+      40,
+      60
+    ],
+    "output_fps": 5
+  },
+  "keyframes": [
+    0
+  ],
+  "samples": [],
+  "errors": [],
+  "error": "VideoCanceled: Đã dừng thao tác video.",
+  "total_sec": 0.302
+}

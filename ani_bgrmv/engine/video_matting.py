@@ -1,4 +1,4 @@
-"""Launch M71 ONNX in a separate Python process after native HQ-SAM2 Track exits.
+"""Run ViTMatte-SAM ONNX in a separate Python process after HQ-SAM2 Track exits.
 
 The worker can be canceled without leaking ORT CUDA state into the GUI process.
 """
@@ -17,45 +17,45 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .video_diagnostics import dump_json, dump_csv, ram_mib, gpu_snapshot, process_cpu_seconds
+from .video_diagnostics import REPORT_VERSION, dump_json, dump_csv, ram_mib, gpu_snapshot, process_cpu_seconds
 from .video_pipeline import VideoCanceled, _check_cancel
 
-PREFIX='__ANIBGRMV_M71__'
+PREFIX='__ANIBGRMV_VIDEO_MATTING__'
 
 
 def _sidecar():
-    path=Path(__file__).resolve().with_name('video_m71_worker.py')
+    path=Path(__file__).resolve().with_name('video_matting_worker.py')
     if path.is_file():
         return path
-    path=Path(getattr(sys,'_MEIPASS',''))/'ani_bgrmv'/'engine'/'video_m71_worker.py'
+    path=Path(getattr(sys,'_MEIPASS',''))/'ani_bgrmv'/'engine'/'video_matting_worker.py'
     if not path.is_file():
-        raise FileNotFoundError('Thiếu video_m71_worker.py trong bản build.')
+        raise FileNotFoundError('Thiếu video_matting_worker.py trong bản build.')
     return path
 
 
-def run_m71(clip, masks, report_dir, progress=None, cancel=None):
-    from ..app_config import APP_CONFIG, M71_ONNX_PATH
-    from .video_hq3_track import _python_runner
+def run_vitmatte_sam(clip, masks, report_dir, progress=None, cancel=None):
+    from ..app_config import VITMATTE_SAM_ONNX_PATH
+    from .video_track import _python_runner
     _check_cancel(cancel)
-    if not Path(M71_ONNX_PATH).is_file():
-        raise FileNotFoundError('Thiếu M71 ONNX cho video: '+str(M71_ONNX_PATH))
+    if not Path(VITMATTE_SAM_ONNX_PATH).is_file():
+        raise FileNotFoundError('Thiếu ViTMatte-SAM ONNX cho video: '+str(VITMATTE_SAM_ONNX_PATH))
     diag=Path(report_dir);diag.mkdir(parents=True,exist_ok=True)
     output_dir=diag.parent.parent
-    cache_dir=output_dir/'_m71_cache'
+    cache_dir=output_dir/'_matting_cache'
     started=time.perf_counter()
-    run_report={'version':'M87','status':'RUNNING','frames':clip.count,
-                'action':'m71_export','samples':[]}
-    dump_json(diag/'m71_adapter_report.json',run_report)
-    with tempfile.TemporaryDirectory(prefix='anibgrmv_m71_') as t:
+    run_report={'version':REPORT_VERSION,'status':'RUNNING','frames':clip.count,
+                'action':'matting_export','samples':[]}
+    dump_json(diag/'matting_adapter_report.json',run_report)
+    with tempfile.TemporaryDirectory(prefix='anibgrmv_matting_') as t:
         staging=Path(t)
         mask_paths=[]
         for idx, m in enumerate(masks):
             _check_cancel(cancel)
             dest=staging/f'{idx:05d}.png'
             if not cv2.imwrite(str(dest),np.asarray(m,np.uint8)):
-                raise OSError('Không thể lưu M71 mask '+str(idx))
+                raise OSError('Không thể lưu mask '+str(idx))
             mask_paths.append(str(dest))
-        job={'m71_onnx':M71_ONNX_PATH, 'source_video':clip.source,
+        job={'model_onnx':VITMATTE_SAM_ONNX_PATH, 'source_video':clip.source,
              'source_frame_indices':clip.source_frame_indices,
              'mask_paths':mask_paths,'frame_count':clip.count,
              'report_dir':str(diag),'cache_dir':str(cache_dir)}
@@ -95,11 +95,11 @@ def run_m71(clip, masks, report_dir, progress=None, cancel=None):
                     except ValueError:
                         continue
                     if obj.get('event')=='error':
-                        error=obj.get('message','Unknown M71 error')
+                        error=obj.get('message','Unknown matting error')
                     if obj.get('event')=='complete':
                         complete=True
                     if progress and 'percent' in obj:
-                        progress(int(obj['percent']),str(obj.get('message','M71')))
+                        progress(int(obj['percent']),str(obj.get('message','ViTMatte-SAM')))
                 elif line.strip():
                     tail.append(line[:400]);tail=tail[-15:]
                 if time.perf_counter()-last_sample>3:
@@ -111,19 +111,19 @@ def run_m71(clip, masks, report_dir, progress=None, cancel=None):
             code=proc.wait(timeout=5)
             _check_cancel(cancel)
             if code!=0 or not complete:
-                raise RuntimeError('M71 ONNX Video Export thất bại (exit %d): %s' %
+                raise RuntimeError('ViTMatte-SAM Video Export thất bại (exit %d): %s' %
                                    (code,error or '\n'.join(tail[-6:]) or 'Không có log.'))
-            alpha_files=json.loads((diag/'m71_alpha_index.json').read_text(encoding='utf-8'))
+            alpha_files=json.loads((diag/'matting_alpha_index.json').read_text(encoding='utf-8'))
             if len(alpha_files)!=clip.count or not all(Path(f).is_file() for f in alpha_files):
-                raise RuntimeError('M71 trả thiếu alpha cache.')
+                raise RuntimeError('ViTMatte-SAM trả thiếu alpha cache.')
             run_report.update(status='OK',total_sec=round(time.perf_counter()-started,3))
-            dump_json(diag/'m71_adapter_report.json',run_report)
-            dump_csv(diag/'m71_process_samples.csv',run_report['samples'])
+            dump_json(diag/'matting_adapter_report.json',run_report)
+            dump_csv(diag/'matting_process_samples.csv',run_report['samples'])
             return alpha_files
         except BaseException as exc:
             run_report.update(status='CANCELLED' if isinstance(exc,VideoCanceled) else 'ERROR',
                               error=str(exc),total_sec=round(time.perf_counter()-started,3))
-            dump_json(diag/'m71_adapter_report.json',run_report)
+            dump_json(diag/'matting_adapter_report.json',run_report)
             raise
         finally:
             if proc.poll() is None:

@@ -1,3 +1,14 @@
+"""Application configuration.
+
+The user-editable ``app_config.json`` lives next to ``app.py`` (source mode)
+or ``AniBGRmv.exe`` (frozen). Missing fields fall back to DEFAULT_APP_CONFIG.
+
+Model names describe architecture + role, not experiment IDs:
+  UNet           automatic foreground segmentation
+  ViTMatte-UNet  matting refinement for UNet masks (automatic cut)
+  HQ-SAM         HQ-SAM2 Large, prompt (Paint/Box) segmentation for Guided Edit
+  ViTMatte-SAM   matting refinement for HQ-SAM masks (Guided Edit, video export)
+"""
 import json
 import shutil
 import sys
@@ -13,40 +24,31 @@ DEFAULT_APP_CONFIG = {
     ),
     "model": {
         "unet_onnx_path": "models/F3_A1_letterbox_constant_768_best.onnx",
-        "vitmatte_onnx_path": "models/m7_vitmatte_letterbox_best.onnx",
+        "vitmatte_unet_onnx_path": "models/m7_vitmatte_letterbox_best.onnx",
     },
     "sam": {
-        # HQ2 is the default for new source builds. Explicitly set
-        # "sam_vit_b_onnx" to roll back without changing the Edit UI.
-        "backend": "hq3_torch",
-        "hq2_base_checkpoint_path": "models/sam2.1_hq_hiera_large.pt",
-        "hq2_decoder_checkpoint_path": "models/hq2_best_decoder.pt",
-        "hq3_decoder_checkpoint_path": "models/hq3_best_overall.pt",
-        "hq3_encoder_onnx_path": "models/hq3_hqsam2_encoder.onnx",
-        "hq3_decoder_onnx_path": "models/hq3_hqsam2_decoder.onnx",
-        "m71_onnx_path": "models/m71_hq3_d0d_best.onnx",
-        "hq2_refine_with_m7": True,
-        "hq2_small_object_crop": True,  # toggle extra HQ2 crop pass if VRAM is tight
-        # Optional: avoid reloading ~900MB HQ2 when reopening Edit; consumes
-        # substantial GPU/CPU memory between Edit sessions. Off by default.
-        "hq2_keep_model_loaded": False,
-        # GPU 4GB: unload F3/M7 during HQ3 Guided; restore on next Single/Batch cut.
-        "hq3_unload_f3_m7_during_guided": True,
-        # Print per-stage GPU/torch VRAM snapshots. Set False after benchmarking.
-        "sam_vram_diagnostics": True,
-        # GPU 4GB memory handoff: release PyTorch's UNUSED cached blocks
-        # before the first/next M71 inference; model weights/features survive.
-        "hq3_trim_torch_before_m71": True,
-        "hq3_trim_torch_min_reclaim_mib": 256,
-        # ONNX Runtime RunOptions: return idle M71 CUDA arena regions after Run.
-        # May increase latency; toggle off for speed A/B comparison.
-        "m71_shrink_gpu_arena_after_run": True,
-        "encoder_onnx_path": "models/sam_vit_b_encoder.onnx",
-        "decoder_onnx_path": "models/sam_vit_b_decoder.onnx",
-        "model_type": "vit_b",
-        "device": "auto",
+        "hqsam_encoder_onnx_path": "models/hq3_hqsam2_encoder.onnx",
+        "hqsam_decoder_onnx_path": "models/hq3_hqsam2_decoder.onnx",
+        "vitmatte_sam_onnx_path": "models/m71_hq3_d0d_best.onnx",
+        # Video Track only (PyTorch sidecar): public base + fine-tuned decoder.
+        "hqsam_base_checkpoint_path": "models/sam2.1_hq_hiera_large.pt",
+        "hqsam_decoder_checkpoint_path": "models/hq3_best_overall.pt",
         "guided_timeout_ms": 0,
-        "cpu_guided_backend": "grabcut",  # nhanh, chất lượng khác SAM; dùng SAM nếu đổi thành "sam"
+        # GPU only. CPU never runs these per stroke (see GuidedPolicy).
+        "refine_each_stroke": True,
+        "small_object_crop": True,
+        # Keep HQ-SAM/ViTMatte-SAM loaded between Edit sessions (more memory).
+        "keep_model_loaded": False,
+        # GPU 4 GB: unload UNet/ViTMatte-UNet while Guided Edit runs.
+        "unload_auto_models_during_guided": True,
+        # ONNX Runtime returns idle CUDA arena memory after each run.
+        "shrink_gpu_arena_after_run": True,
+        "log_timing": False,
+        # CPU Guided selector: "grabcut" (fast) or "hqsam" (best quality,
+        # needs one HQ-SAM encoder pass per image).
+        "cpu_guided_backend": "grabcut",
+        # CPU "Matting" button model: "off", "vitmatte_unet" or "vitmatte_sam".
+        "cpu_matting_model": "vitmatte_unet",
     },
     "output": {
         "single_output_dir": "output/single_saved",
@@ -56,11 +58,11 @@ DEFAULT_APP_CONFIG = {
         "show_debug_button": True,
     },
     "video": {
-        # Video temporal tracking runs in a separate installed PyTorch Python.
-        # Source mode uses sys.executable; GPU EXE needs an absolute path here.
-        # A standalone ONNX-only EXE cannot provide SAM2 temporal memory.
+        # Video Track runs in a separate Python that has PyTorch + HQ-SAM2.
+        # Source mode uses sys.executable; the GPU EXE needs an absolute path.
         "tracker_python_path": "",
-        "matting_export": "auto",  # GPU -> M71 ONNX, CPU -> binary; options auto/m71/binary
+        # "auto" = vitmatte_sam on GPU, binary on CPU; or "vitmatte_sam"/"binary".
+        "matting_export": "auto",
     },
     "batch": {
         "max_batch_images": 30,
@@ -68,9 +70,44 @@ DEFAULT_APP_CONFIG = {
     "compute": {"mode": "cpu", "gpu_id": None, "gpu_name": None, "cpu_threads": 2},
 }
 
+# Keys from older releases. A stale key is rejected with its new name rather
+# than silently ignored (a custom model path would otherwise be lost).
+LEGACY_KEYS = {
+    ("model", "vitmatte_onnx_path"): "model.vitmatte_unet_onnx_path",
+    ("sam", "hq3_encoder_onnx_path"): "sam.hqsam_encoder_onnx_path",
+    ("sam", "hq3_decoder_onnx_path"): "sam.hqsam_decoder_onnx_path",
+    ("sam", "m71_onnx_path"): "sam.vitmatte_sam_onnx_path",
+    ("sam", "hq2_base_checkpoint_path"): "sam.hqsam_base_checkpoint_path",
+    ("sam", "hq3_decoder_checkpoint_path"): "sam.hqsam_decoder_checkpoint_path",
+    ("sam", "hq2_refine_with_m7"): "sam.refine_each_stroke",
+    ("sam", "hq2_small_object_crop"): "sam.small_object_crop",
+    ("sam", "hq2_keep_model_loaded"): "sam.keep_model_loaded",
+    ("sam", "hq3_unload_f3_m7_during_guided"): "sam.unload_auto_models_during_guided",
+    ("sam", "m71_shrink_gpu_arena_after_run"): "sam.shrink_gpu_arena_after_run",
+    ("sam", "hq3_onnx_timing"): "sam.log_timing",
+    ("sam", "cpu_grabcut_matting"): "sam.cpu_matting_model",
+    ("sam", "backend"): None,
+    ("sam", "model_type"): None,
+    ("sam", "device"): None,
+    ("sam", "encoder_onnx_path"): None,
+    ("sam", "decoder_onnx_path"): None,
+    ("sam", "hq2_decoder_checkpoint_path"): None,
+    ("sam", "sam_vram_diagnostics"): None,
+    ("sam", "hq3_trim_torch_before_m71"): None,
+    ("sam", "hq3_trim_torch_min_reclaim_mib"): None,
+    ("sam", "hq3_onnx_reuse_encoder_session"): None,
+    ("sam", "hq3_onnx_encoder_shrink_gpu_arena_after_run"): None,
+    ("sam", "hq3_onnx_cpu_threads"): None,
+}
 
-# Source mode: config nằm cạnh app.py.
-# PyInstaller exe mode: config nằm cạnh AniBGRmv.exe.
+ALLOWED_VALUES = {
+    ("sam", "cpu_guided_backend"): ("grabcut", "hqsam"),
+    ("sam", "cpu_matting_model"): ("off", "vitmatte_unet", "vitmatte_sam"),
+    ("video", "matting_export"): ("auto", "vitmatte_sam", "binary"),
+}
+
+
+# Source mode: config next to app_config.py; EXE mode: next to the EXE.
 def get_app_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -81,9 +118,7 @@ APP_BASE_DIR = get_app_base_dir()
 
 
 def deep_merge_config(default: dict, user: dict) -> dict:
-    """
-    Merge config để user có thể thiếu vài field mà app vẫn có default an toàn.
-    """
+    """Merge so that a user file may omit fields and still get safe defaults."""
     merged = dict(default)
     for key, value in user.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -94,28 +129,16 @@ def deep_merge_config(default: dict, user: dict) -> dict:
 
 
 def get_external_config_path() -> Path:
-    """
-    Config người dùng sửa sau khi build.
-
-    Source mode:
-        project/app_config.json
-
-    Exe mode:
-        dist/AniBGRmv/app_config.json, nằm cạnh AniBGRmv.exe
-    """
+    """The config the user edits after building (next to the EXE/app)."""
     return APP_BASE_DIR / CONFIG_FILE_NAME
 
 
 def get_bundled_config_path() -> Path:
-    """
-    Config được PyInstaller bundle vào _internal/_MEIPASS.
-    Chỉ dùng làm seed lần đầu nếu chưa có external config cạnh exe.
-    """
+    """PyInstaller-bundled seed, copied out only when no external config exists."""
     return Path(getattr(sys, "_MEIPASS", APP_BASE_DIR)) / CONFIG_FILE_NAME
 
 
 def get_config_path() -> Path:
-    # Hàm này dùng để hiển thị path config thật sự user nên sửa.
     return get_external_config_path()
 
 
@@ -128,16 +151,7 @@ def write_default_config(config_path: Path):
 
 
 def ensure_external_config_exists() -> Path:
-    """
-    Quy tắc:
-    1. Nếu đã có app_config.json cạnh exe/app.py -> dùng file đó.
-    2. Nếu chưa có, nhưng có config được bundle -> copy bundle ra cạnh exe/app.py.
-    3. Nếu cả hai đều không có -> tạo default config.
-
-    Lý do:
-    - Người dùng cần sửa config sau khi build mà không rebuild.
-    - PyInstaller onedir có thể đặt data trong _internal, không phải cạnh exe.
-    """
+    """Use the external config; else copy the bundled seed; else write defaults."""
     external_config = get_external_config_path()
     bundled_config = get_bundled_config_path()
 
@@ -154,6 +168,21 @@ def ensure_external_config_exists() -> Path:
     return external_config
 
 
+def validate_config(config: dict, source: Path) -> None:
+    """Reject legacy keys and unknown option values with an actionable message."""
+    problems = []
+    for (group, key), new_name in LEGACY_KEYS.items():
+        if key in (config.get(group) or {}):
+            problems.append(f"{group}.{key} → đổi thành {new_name}" if new_name
+                            else f"{group}.{key} → không còn dùng, hãy xóa")
+    for (group, key), allowed in ALLOWED_VALUES.items():
+        value = (config.get(group) or {}).get(key)
+        if value is not None and value not in allowed:
+            problems.append(f"{group}.{key}={value!r} → chỉ nhận {', '.join(allowed)}")
+    if problems:
+        raise ValueError(f"Cấu hình {source} cần cập nhật:\n- " + "\n- ".join(problems))
+
+
 def load_app_config() -> dict:
     config_path = ensure_external_config_exists()
 
@@ -167,15 +196,12 @@ def load_app_config() -> dict:
 
     if not isinstance(user_config, dict):
         raise ValueError(f"File cấu hình {config_path} phải là JSON object.")
-
+    validate_config(user_config, config_path)
     return deep_merge_config(DEFAULT_APP_CONFIG, user_config)
 
 
 def resolve_app_path(path_value: str) -> Path:
-    """
-    Đường dẫn tuyệt đối: dùng nguyên.
-    Đường dẫn tương đối: hiểu là nằm dưới APP_BASE_DIR.
-    """
+    """Absolute paths are kept; relative paths are under APP_BASE_DIR."""
     p = Path(path_value).expanduser()
     if p.is_absolute():
         return p
@@ -184,58 +210,37 @@ def resolve_app_path(path_value: str) -> Path:
 
 APP_CONFIG = load_app_config()
 
-F2_A1_ONNX_PATH = str(resolve_app_path(APP_CONFIG["model"]["unet_onnx_path"]))
-M6_ONNX_PATH = str(resolve_app_path(APP_CONFIG["model"]["vitmatte_onnx_path"]))
+UNET_ONNX_PATH = str(resolve_app_path(APP_CONFIG["model"]["unet_onnx_path"]))
+VITMATTE_UNET_ONNX_PATH = str(resolve_app_path(APP_CONFIG["model"]["vitmatte_unet_onnx_path"]))
+
+HQSAM_ENCODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hqsam_encoder_onnx_path"]))
+HQSAM_DECODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hqsam_decoder_onnx_path"]))
+VITMATTE_SAM_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["vitmatte_sam_onnx_path"]))
+HQSAM_BASE_CHECKPOINT_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hqsam_base_checkpoint_path"]))
+HQSAM_DECODER_CHECKPOINT_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hqsam_decoder_checkpoint_path"]))
+GUIDED_EDIT_TIMEOUT_MS = int(APP_CONFIG["sam"]["guided_timeout_ms"])
 
 MAX_BATCH_IMAGES = int(APP_CONFIG["batch"]["max_batch_images"])
 
 SINGLE_OUTPUT_DIR = str(resolve_app_path(APP_CONFIG["output"]["single_output_dir"]))
 BATCH_OUTPUT_DIR = str(resolve_app_path(APP_CONFIG["output"]["batch_output_dir"]))
 
-# Development: show the Debug toggle and initially check it.
-# Release: set output.show_debug_button=false and
-# output.save_debug_outputs=false in ani_bgrmv/app_config.json.
+# Release builds set output.show_debug_button=false and save_debug_outputs=false.
 SAVE_DEBUG_OUTPUTS = bool(APP_CONFIG["output"]["save_debug_outputs"])
 SHOW_DEBUG_BUTTON = bool(APP_CONFIG["output"]["show_debug_button"])
 
-SAM_BACKEND = str(APP_CONFIG["sam"].get("backend", "hq2_torch")).lower()
-if SAM_BACKEND not in ("hq2_torch", "hq3_torch", "hq3_onnx", "sam_vit_b_onnx"):
-    raise ValueError(f"sam.backend không được hỗ trợ: {SAM_BACKEND}")
-SAM_ENCODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["encoder_onnx_path"]))
-SAM_DECODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["decoder_onnx_path"]))
-HQ2_BASE_CHECKPOINT_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hq2_base_checkpoint_path"]))
-HQ2_BEST_DECODER_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hq2_decoder_checkpoint_path"]))
-HQ3_BEST_DECODER_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hq3_decoder_checkpoint_path"]))
-M71_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["m71_onnx_path"]))
-HQ3_ENCODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hq3_encoder_onnx_path"]))
-HQ3_DECODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hq3_decoder_onnx_path"]))
-# Existing GuidedEditWorker argument name is preserved. For HQ2 it now points
-# to the *full public HQ-SAM2 base*, never to the decoder-only BEST weights.
-SAM_CHECKPOINT_PATH = (HQ2_BASE_CHECKPOINT_PATH if SAM_BACKEND in ("hq2_torch", "hq3_torch")
-                       else HQ3_ENCODER_ONNX_PATH if SAM_BACKEND == "hq3_onnx"
-                       else SAM_ENCODER_ONNX_PATH)
-SAM_MODEL_TYPE = ("hq3_large" if SAM_BACKEND in ("hq3_torch", "hq3_onnx")
-                  else "hq2_large" if SAM_BACKEND == "hq2_torch"
-                  else str(APP_CONFIG["sam"].get("model_type", "vit_b")))
-SAM_DEVICE = str(APP_CONFIG["sam"].get("device", "auto"))
-GUIDED_EDIT_TIMEOUT_MS = int(APP_CONFIG.get("sam", {}).get("guided_timeout_ms", 5000))
+
+def hqsam_manifest_path() -> Path:
+    """The exporter writes '<encoder stem>.manifest.json' next to the encoder."""
+    return Path(HQSAM_ENCODER_ONNX_PATH).with_suffix(".manifest.json")
 
 
-def sam_runtime_assets() -> tuple[tuple[str, str], ...]:
-    """Model-specific required files, shared by engine and GPU verification."""
-    if SAM_BACKEND == "hq3_onnx":
-        return (("HQ3 HQ-SAM2 encoder ONNX", HQ3_ENCODER_ONNX_PATH),
-                ("HQ3 HQ-SAM2 decoder ONNX", HQ3_DECODER_ONNX_PATH),
-                ("HQ3 ONNX verified manifest", str(Path(HQ3_ENCODER_ONNX_PATH).with_suffix('.manifest.json'))),
-                ("M71 ViTMatte ONNX (SAM only)", M71_ONNX_PATH))
-    if SAM_BACKEND == "hq3_torch":
-        return (("HQ-SAM2 Large base", HQ2_BASE_CHECKPOINT_PATH),
-                ("HQ3 BEST decoder", HQ3_BEST_DECODER_PATH),
-                ("M71 ViTMatte ONNX (SAM only)", M71_ONNX_PATH))
-    if SAM_BACKEND == "hq2_torch":
-        return (("HQ-SAM2 Large base", HQ2_BASE_CHECKPOINT_PATH),
-                ("HQ2 BEST decoder", HQ2_BEST_DECODER_PATH))
-    return (("SAM ViT-B encoder ONNX", SAM_ENCODER_ONNX_PATH),
-            ("SAM ViT-B decoder ONNX", SAM_DECODER_ONNX_PATH))
+def guided_model_assets() -> tuple[tuple[str, str], ...]:
+    """Files required by HQ-SAM Guided Edit, shared by engine and GPU check."""
+    return (("HQ-SAM encoder ONNX", HQSAM_ENCODER_ONNX_PATH),
+            ("HQ-SAM decoder ONNX", HQSAM_DECODER_ONNX_PATH),
+            ("HQ-SAM export manifest", str(hqsam_manifest_path())),
+            ("ViTMatte-SAM ONNX", VITMATTE_SAM_ONNX_PATH))
+
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}

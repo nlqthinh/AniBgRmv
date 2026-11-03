@@ -55,6 +55,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.edit_redo_stack: list[np.ndarray] = []
         self.edit_thread: QThread | None = None
         self.edit_worker: GuidedEditWorker | None = None
+        self.edit_job_kind = "guided"
         self.guided_ignore_result = False
         self.guided_running = False
         self.guided_timeout_timer = QTimer(self)
@@ -177,6 +178,9 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.edit_buttons_widget = QWidget()
         self.btn_erase = QPushButton("Erase")
         self.btn_clear_mask = QPushButton("Clear Mask")
+        self.btn_matting = QPushButton("Matting")
+        self.btn_matting.setToolTip("CPU: chạy ViTMatte một lần trên toàn bộ mask hiện tại sau khi chỉnh Paint/Box.")
+        self.btn_matting.hide()  # Enabled/visible only in CPU Edit mode.
         self.btn_fit = QPushButton("Fit")
         self.btn_restore = QPushButton("Restore")
         self.btn_exit_edit = QPushButton("Exit")
@@ -199,12 +203,12 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.btn_clear_mask.setStyleSheet(EDIT_ERASE_BUTTON_STYLE)
         self.btn_clear_mask.setToolTip("Xóa toàn bộ alpha mask (có thể Undo).")
         self.btn_restore.setStyleSheet(EDIT_RESTORE_BUTTON_STYLE)
-        for btn in [self.btn_fit, self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save]:
+        for btn in [self.btn_matting, self.btn_fit, self.btn_exit_edit, self.btn_brush_size, self.btn_edit_save]:
             btn.setStyleSheet(EDIT_BLACK_BUTTON_STYLE)
         self.btn_stop_guided.setStyleSheet(CANCEL_BUTTON_STYLE)
         self.btn_edit_save.setStyleSheet(EDIT_BLACK_BUTTON_STYLE)
 
-        for btn, width in [(self.btn_erase, 88), (self.btn_clear_mask, 112), (self.btn_fit, 64),
+        for btn, width in [(self.btn_erase, 88), (self.btn_clear_mask, 112), (self.btn_matting, 92), (self.btn_fit, 64),
                            (self.btn_restore, 98), (self.btn_exit_edit, 84),
                            (self.btn_brush_size, 122), (self.btn_edit_save, 104),
                            (self.btn_edit_debug, 112), (self.btn_stop_guided, 84)]:
@@ -214,6 +218,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.edit_buttons_widget.setFixedHeight(58)
 
         edit_buttons_row = center_button_row(
+            self.btn_matting,
             self.btn_fit,
             self.btn_erase,
             self.btn_clear_mask,
@@ -262,6 +267,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
 
         self.btn_erase.clicked.connect(lambda: self.set_edit_operation("erase"))
         self.btn_clear_mask.clicked.connect(self.clear_edit_mask)
+        self.btn_matting.clicked.connect(self.start_matting)
         self.btn_fit.clicked.connect(self.edit_canvas.reset_view)
         self.btn_restore.clicked.connect(lambda: self.set_edit_operation("restore"))
         self.btn_guided.clicked.connect(lambda: self.set_edit_submode("guided"))
@@ -331,7 +337,7 @@ class SingleCutPage(SingleEditControllerMixin, QWidget):
         self.cancel_requested = False
         self.current_prediction = None
         self.set_busy_buttons(True)
-        self.canvas.set_loading_mode("Đang cắt ảnh bằng F2_A1 → ViTMatte M6...")
+        self.canvas.set_loading_mode("Đang cắt ảnh bằng UNet → ViTMatte-UNet...")
         self.status_label.setText(f"Đang xử lý: {Path(image_path).name}")
 
         self.current_thread = QThread()

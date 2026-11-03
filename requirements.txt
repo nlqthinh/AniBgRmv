@@ -7,13 +7,13 @@ numpy
 # Batch CSV reports now use stdlib csv; pandas is not a runtime dependency.
 pyinstaller
 # CUDA 12.8/cuDNN 9 (Windows). CPUExecutionProvider remains available.
-# The CUDA/CUDNN extras supply ONNX Runtime's libraries for F3/M7.
+# The CUDA/CUDNN extras supply ONNX Runtime's libraries for all image models.
 onnxruntime-gpu[cuda,cudnn]==1.26.0
 
-# HQ2 BEST: the fine-tuned .pt only replaces HQ-SAM2's mask decoder.
-# GPU HQ2 needs the official PyTorch HQ-SAM2 image predictor; CPU Lite still
-# uses GrabCut and excludes torch/sam2 when packaged by AniBGRmv.spec.
-# CUDA 12.8 wheel index, matching the existing ONNX Runtime CUDA 12.x stack.
+# PyTorch + HQ-SAM2 are NOT used by the app's image pipeline (ONNX only).
+# They are needed for: video Track (separate Python process) and the ONNX
+# export tools in tools/. The EXE never bundles them (see AniBGRmv.spec).
+# CUDA 12.8 wheel index, matching the ONNX Runtime CUDA 12.x stack.
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch>=2.7,<3
 torchvision>=0.22,<1
@@ -22,11 +22,11 @@ iopath>=0.1.10
 omegaconf>=2.3
 timm>=1.0
 einops>=0.7
-# Exact SysCV/sam-hq revision recorded by notebook HQ2, NOT Meta's sam2.
+# Exact SysCV/sam-hq revision used by the HQ-SAM training notebook, NOT Meta's sam2.
 # Editable installation is REQUIRED: Hydra reads the HQ-SAM2 YAML files from
 # the cloned source tree. A regular VCS wheel can omit those configuration files.
 -e git+https://github.com/SysCV/sam-hq.git@e696978d60352dc9a26b12631cd91781502c6546#egg=hq-sam-2&subdirectory=sam-hq2
 
-# M71 export tools use existing dependencies when compatible.
-# If required, export-only packages are installed separately under
-# .m71_export_deps/; do NOT pin transformers in the app runtime.
+# ViTMatte export tools use existing dependencies when compatible. If needed,
+# export-only packages are installed separately under .export_deps/
+# (tools/prepare_export_deps.py); do NOT pin transformers in the app runtime.

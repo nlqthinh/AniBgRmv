@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from .video_diagnostics import dump_json, create_run, ram_mib
+from .video_diagnostics import REPORT_VERSION, dump_json, create_run, ram_mib
 
 import cv2
 import numpy as np
@@ -169,7 +169,7 @@ def track_masks(clip: VideoClip, keyframes: dict[int, np.ndarray],
     """Track with REAL HQ-SAM2 temporal memory; no optical-flow fallback.
 
     The user mask is a conditioning prompt via add_new_mask. The GPU child uses
-    the HQ-SAM2 Large base + fine-tuned HQ3 decoder. This adapter raises an
+    the HQ-SAM2 Large base + fine-tuned HQ-SAM decoder. This adapter raises an
     explicit error if PyTorch/native checkpoints are not available.
     """
     if not keyframes:
@@ -177,9 +177,9 @@ def track_masks(clip: VideoClip, keyframes: dict[int, np.ndarray],
     if not any(np.any(mask > 0) for mask in keyframes.values()):
         raise VideoFormatError('Mask đang trống. Hãy chọn vùng cần giữ bằng Restore trước khi Track.')
     _check_cancel(cancel)
-    from .video_hq3_track import track_hq3_video
+    from .video_track import track_video
     extra = {"report_dir": report_dir} if report_dir is not None else {}
-    return track_hq3_video(clip, keyframes, progress=progress, cancel=cancel, **extra)
+    return track_video(clip, keyframes, progress=progress, cancel=cancel, **extra)
 
 
 def stabilize_identical_frames(clip: VideoClip, masks, keyframes):
@@ -223,22 +223,22 @@ EXPORT_BACKGROUNDS = {'green': (0, 255, 0), 'black': (0, 0, 0),
 def export_video(clip: VideoClip, masks: tuple[np.ndarray, ...], dest: str,
                  background='green', progress=None, cancel=None,
                  matting='binary', report_dir=None) -> str:
-    """M87: M71 16-bit soft alpha on CUDA (optional) then MP4 chroma export.
+    """Optional ViTMatte-SAM 16-bit soft alpha on CUDA, then MP4 chroma export.
 
-    M71 runs in a child process *after* SAM2 tracking has exited. The existing
-    binary mode remains usable for CPU Lite and codec self-tests. MP4 has no
-    actual alpha channel; export remains chroma-key, no audio (M86 semantics).
+    ViTMatte-SAM runs in a child process *after* SAM2 tracking has exited.
+    Binary mode stays usable for the CPU edition and codec self-tests. MP4 has
+    no alpha channel: export is chroma-key, without audio.
     """
     if len(masks) != clip.count:
         raise VideoFormatError('Cần Track lại sau khi thay đổi mask trước khi Export.')
     matting = str(matting).lower()
-    if matting not in ('m71', 'binary'):
-        raise VideoFormatError('video.matting_export phải là m71 hoặc binary.')
+    if matting not in ('vitmatte_sam', 'binary'):
+        raise VideoFormatError('video.matting_export phải là vitmatte_sam hoặc binary.')
     diag = Path(report_dir) if report_dir else create_run(Path(dest).parent, 'export')
     diag.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     dest_path = Path(dest)
-    report = {'version': 'M87', 'status': 'RUNNING', 'action': 'export',
+    report = {'version': REPORT_VERSION, 'status': 'RUNNING', 'action': 'export',
               'video': str(Path(clip.source).name), 'frames': clip.count,
               'matting': matting, 'output_fps': clip.output_fps,
               'source_resolution': [clip.source_width, clip.source_height],
@@ -249,17 +249,17 @@ def export_video(clip: VideoClip, masks: tuple[np.ndarray, ...], dest: str,
     try:
         _check_cancel(cancel)
         alpha_files = None
-        if matting == 'm71':
-            # No silent fallback: fail loudly if CUDA/M71 is unavailable.
-            from .video_m71_runtime import run_m71
+        if matting == 'vitmatte_sam':
+            # No silent fallback: fail loudly if CUDA/ViTMatte-SAM is unavailable.
+            from .video_matting import run_vitmatte_sam
             t = time.perf_counter()
             def matting_progress(value, message):
                 if progress:
                     progress(min(78, round(value*.78)), message)
-            alpha_files = run_m71(clip, masks, diag, progress=matting_progress, cancel=cancel)
-            report['stages_sec']['m71_alpha'] = round(time.perf_counter()-t,3)
+            alpha_files = run_vitmatte_sam(clip, masks, diag, progress=matting_progress, cancel=cancel)
+            report['stages_sec']['matting_alpha'] = round(time.perf_counter()-t,3)
         else:
-            report['stages_sec']['m71_alpha'] = 0
+            report['stages_sec']['matting_alpha'] = 0
 
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         cap = _reader(clip.source)
@@ -283,7 +283,7 @@ def export_video(clip: VideoClip, masks: tuple[np.ndarray, ...], dest: str,
                 if alpha_files is not None:
                     a16 = cv2.imread(str(alpha_files[i]), cv2.IMREAD_UNCHANGED)
                     if a16 is None or a16.dtype != np.uint16:
-                        raise RuntimeError(f'Alpha M71 frame {i} không phải PNG 16-bit.')
+                        raise RuntimeError(f'Alpha ViTMatte-SAM frame {i} không phải PNG 16-bit.')
                     alpha = a16.astype(np.float32) / 65535.0
                 else:
                     alpha = masks[i].astype(np.float32) / 255.0

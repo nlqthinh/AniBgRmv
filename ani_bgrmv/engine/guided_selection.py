@@ -1,4 +1,4 @@
-"""HQ2 Guided instance selection, independent of the Edit UI and M7.
+"""HQ-SAM Guided instance selection, independent of the Edit UI and matting.
 
 All boxes are (left, top, right, bottom) with an exclusive right/bottom.
 Never clip a predicted object to a rectangular prompt ROI: doing so produces
@@ -11,14 +11,14 @@ import cv2
 import numpy as np
 
 
-MAX_HQ2_INSTANCE_SIDE = 1536
-MAX_HQ2_AREA_BRUSH_FACTOR = 500
+MAX_INSTANCE_SIDE = 1536
+MAX_AREA_BRUSH_FACTOR = 500
 
 
 def small_object_crop_box(
     image_hw: tuple[int, int], points: np.ndarray, brush_size: int,
 ) -> tuple[int, int, int, int] | None:
-    """Offer higher effective HQ2 resolution for clicks/very short strokes.
+    """Offer higher effective HQ-SAM resolution for clicks/very short strokes.
 
     Zoom is a display transform only, so the source-image pixel coordinates
     determine the crop. Long strokes retain full-image inference unchanged.
@@ -95,18 +95,18 @@ def select_prompt_instance(
             (top <= y0 and y0 > 0) or
             (right >= x1 and x1 < w) or
             (bottom >= y1 and y1 < h) or
-            right - left > MAX_HQ2_INSTANCE_SIDE or
-            bottom - top > MAX_HQ2_INSTANCE_SIDE or
-            area > max(100_000, MAX_HQ2_AREA_BRUSH_FACTOR * brush_size ** 2)):
+            right - left > MAX_INSTANCE_SIDE or
+            bottom - top > MAX_INSTANCE_SIDE or
+            area > max(100_000, MAX_AREA_BRUSH_FACTOR * brush_size ** 2)):
         return None
 
     if crop_box is not None:
         if image_hw is None:
-            raise ValueError("image_hw cần được cung cấp khi kiểm tra crop HQ2.")
+            raise ValueError("image_hw cần được cung cấp khi kiểm tra crop HQ-SAM.")
         ih, iw = image_hw
         cx0, cy0, cx1, cy1 = crop_box
         # A crop mask that runs off-screen is only a fragment of a larger
-        # object. Full-frame HQ2 is safer for that case.
+        # object. The full-image prediction is safer for that case.
         if ((left <= cx0 and cx0 > 0) or
                 (top <= cy0 and cy0 > 0) or
                 (right >= cx1 and cx1 < iw) or
@@ -119,12 +119,12 @@ def select_prompt_instance(
 
 
 def instance_support_box(mask: np.ndarray, brush_size: int) -> tuple[int, int, int, int]:
-    """Pad around the *whole* instance for M7, never cut through its body."""
+    """Pad around the *whole* instance for matting, never cut through its body."""
     h, w = mask.shape
     ys, xs = np.nonzero(mask)
     if not len(xs):
-        raise ValueError("Không thể tạo ROI từ mask HQ2 rỗng.")
-    # M7's maximum 33px dilation at 768 has radius 16; add headroom for
+        raise ValueError("Không thể tạo ROI từ mask HQ-SAM rỗng.")
+    # The matting trimap's maximum 33px dilation at 768 has radius 16; add headroom for
     # upscaling/downscaling when restoring its support to source resolution.
     pad = max(48, brush_size * 2, int(np.ceil(20 * max(h, w) / 768)))
     return (max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad),

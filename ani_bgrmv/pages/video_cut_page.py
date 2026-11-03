@@ -1,4 +1,4 @@
-"""M84 video editor: M81 Guided keyframes and native HQ-SAM2 Video Predictor."""
+"""Video editor: Guided keyframes and the native HQ-SAM2 Video Predictor."""
 from __future__ import annotations
 
 import os
@@ -11,8 +11,7 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QMessageBox,
                                QPushButton, QProgressBar, QSlider, QVBoxLayout, QWidget)
 
-from ..app_config import (APP_BASE_DIR, APP_CONFIG, SAM_CHECKPOINT_PATH,
-                          SAM_DEVICE, SAM_MODEL_TYPE)
+from ..app_config import APP_BASE_DIR, APP_CONFIG
 from ..engine.video_diagnostics import create_run
 from ..engine.video_pipeline import (VideoCanceled, VideoClip, VideoFormatError,
                                      blank_alpha, export_video, extract_clip,
@@ -521,10 +520,7 @@ class VideoCutPage(QWidget):
                                   stroke_points=points or [],
                                   prompt_box=box,
                                   brush_size=self.brush_slider.value(),
-                                  operation=self.operation,
-                                  sam_checkpoint_path=SAM_CHECKPOINT_PATH,
-                                  sam_model_type=SAM_MODEL_TYPE,
-                                  sam_device=SAM_DEVICE)
+                                  operation=self.operation)
         self.edit_canvas.clear_stroke()
         self._run_job('guided', worker)
 
@@ -577,16 +573,13 @@ class VideoCutPage(QWidget):
             QMessageBox.warning(self, 'Chưa có mask',
                                 'Hãy dùng Restore chọn vùng cần giữ trên ít nhất một frame, rồi bấm Track.')
             return
-        # GPU video worker owns a separate CUDA context. Release cached image
-        # HQ3/M71 sessions and (when available) F3/M7 ONNX sessions first.
-        # The image engine lazily reloads them when needed again.
+        # The GPU video worker owns a separate CUDA context: release the image
+        # engine's Guided and automatic sessions first (reloaded lazily later).
         engine = self.engine_getter()
         if engine is not None:
             try:
-                if hasattr(engine, 'release_sam_resources'):
-                    engine.release_sam_resources()
-                if hasattr(engine, '_release_auto_sessions_for_hq3'):
-                    engine._release_auto_sessions_for_hq3()
+                engine.release_guided_resources()
+                engine.release_auto_sessions()
             except Exception as exc:
                 QMessageBox.warning(self, 'Không giải phóng được VRAM',
                                     f'Không bắt đầu Track khi session GPU chưa được giải phóng: {exc}')
@@ -621,7 +614,7 @@ class VideoCutPage(QWidget):
             gpu_active = (load_machine_selection().get('mode') == 'gpu' or
                           APP_CONFIG.get('compute',{}).get('mode') == 'gpu')
         mode = str(APP_CONFIG.get('video', {}).get('matting_export', 'auto')).lower()
-        matting = ('m71' if gpu_active else 'binary') if mode == 'auto' else mode
+        matting = ('vitmatte_sam' if gpu_active else 'binary') if mode == 'auto' else mode
         self._last_export_diagnostics = str(report_dir)
         self._run_job('export', VideoJob('export', self.clip, self.tracked_masks,
                                          str(path), background=bg_mode,

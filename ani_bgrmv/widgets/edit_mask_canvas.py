@@ -1,21 +1,19 @@
-from pathlib import Path
-
 import cv2
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import Qt, QRectF, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel, QSlider, QSizePolicy, QVBoxLayout, QWidget
 from ..utils import pil_to_pixmap
 from .background_swatches import BackgroundSwatches, BACKGROUND_COLORS, BACKGROUND_MODES
 
-# M37 — chỉnh độ mờ của con trỏ ở đây (0 = trong suốt, 255 = đậm hoàn toàn).
+# Chỉnh độ mờ của con trỏ ở đây (0 = trong suốt, 255 = đậm hoàn toàn).
 # Màu: ERASE_CURSOR_RGB / RESTORE_CURSOR_RGB là (đỏ, xanh lá).
 ERASE_CURSOR_RGB = (255, 0, 0)
 RESTORE_CURSOR_RGB = (0, 220, 75)
 BRUSH_CURSOR_OUTLINE_ALPHA = 75  # trước đây 170; nay mờ hơn một nửa
 BRUSH_CURSOR_FILL_ALPHA = 18     # trước đây 45; nay mờ hơn một nửa
-GUIDED_STROKE_ALPHA = 124       # M37.2: nét màu Guided/SAM nhạt hơn ~25% so với 165 (0..255)
+GUIDED_STROKE_ALPHA = 124       # Nét màu Guided nhạt hơn ~25% so với 165 (0..255)
 DEFAULT_BACKGROUND_OPACITY = 100  # 100% retains the existing background preview.
 
 class EditMaskCanvas(QFrame):
@@ -27,7 +25,7 @@ class EditMaskCanvas(QFrame):
 
     def __init__(self):
         super().__init__()
-        # M22: lower minimum height so bottom edit buttons do not get pushed
+        # Lower minimum height so bottom edit buttons do not get pushed
         # outside the window until the user maximizes it.
         self.setMinimumHeight(320)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -123,7 +121,7 @@ class EditMaskCanvas(QFrame):
         self._background_opacity_timer.timeout.connect(self._refresh_background_opacity)
         self.background_opacity_slider.sliderReleased.connect(self._refresh_background_opacity)
 
-        # M22 performance cache: do not rebuild PIL/QPixmap on every paint event.
+        # Performance cache: do not rebuild PIL/QPixmap on every paint event.
         self._preview_cache: QPixmap | None = None
         self._hover_pos = None
         self._hover_inside = False
@@ -339,7 +337,7 @@ class EditMaskCanvas(QFrame):
         return rect.left() + x * scale, rect.top() + y * scale
 
     def _render_preview_region(self, x0: int, y0: int, x1: int, y1: int) -> Image.Image:
-        """Memory-efficient alpha composite, preserving M37.2 backgrounds.
+        """Memory-efficient alpha composite, preserving the selected backgrounds.
 
         Previously rgb.astype(float32) and multiple RGB-sized temporaries
         could briefly allocate hundreds of MiB on a 4K/8K image. Work per
@@ -447,7 +445,7 @@ class EditMaskCanvas(QFrame):
                 x, y = self._image_to_widget(*self.stroke_points[0])
                 painter.drawPoint(int(x), int(y))
             else:
-                # M37.2: draw the whole stroke in ONE path. Painting separate
+                # Draw the whole stroke in ONE path. Painting separate
                 # segments re-composited their translucent caps/joins, making
                 # fast strokes noticeably darker where consecutive segments meet.
                 x0, y0 = self._image_to_widget(*self.stroke_points[0])
@@ -622,7 +620,7 @@ class EditMaskCanvas(QFrame):
         else:
             self.zoom = max(0.25, self.zoom / 1.15)
 
-        # M23: zoom around cursor, not around image center.
+        # Zoom around cursor, not around image center.
         if before is not None:
             rect = self._image_rect()
             scale = self._base_scale() * self.zoom

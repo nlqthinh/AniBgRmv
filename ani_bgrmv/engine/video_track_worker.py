@@ -1,4 +1,4 @@
-"""Isolated HQ-SAM2/HQ3 video tracker (run by a Python environment with torch).
+"""Isolated HQ-SAM2 video tracker (run by a Python environment with torch).
 
 Uses the SysCV HQ-SAM2 Video Predictor, its temporal memory and bidirectional
 propagation. NOT optical flow. Arguments: path to a trusted JSON job. No network,
@@ -12,12 +12,14 @@ import time
 import statistics
 import traceback
 try:
-    from .video_diagnostics import dump_json, dump_csv, ram_mib, qseconds, now
+    from .video_diagnostics import REPORT_VERSION, dump_json, dump_csv, ram_mib, qseconds, now
 except ImportError:
-    from video_diagnostics import dump_json, dump_csv, ram_mib, qseconds, now
+    from video_diagnostics import REPORT_VERSION, dump_json, dump_csv, ram_mib, qseconds, now
 from pathlib import Path
 
-PROGRESS_PREFIX = '__ANIBGRMV_HQ3_TRACK__'
+PROGRESS_PREFIX = '__ANIBGRMV_VIDEO_TRACK__'
+# Decoder checkpoint format written by the HQ-SAM training notebook.
+DECODER_FORMAT = 'HQ2_HQSAM2_decoder_state_v2'
 
 
 def emit(event: dict):
@@ -46,7 +48,7 @@ def run(job_file: Path):
 
     job = json.loads(job_file.read_text(encoding='utf-8'))
     base = Path(job['base_checkpoint'])
-    best = Path(job['hq3_decoder_checkpoint'])
+    best = Path(job['decoder_checkpoint'])
     frames_dir = Path(job['frames_dir'])
     output = Path(job['output_dir'])
     count = int(job['frame_count'])
@@ -56,7 +58,7 @@ def run(job_file: Path):
         raise RuntimeError('Video Predictor yêu cầu CUDA; không tự chuyển sang CPU.')
     for asset in (base, best):
         if not asset.is_file():
-            raise FileNotFoundError('Thiếu checkpoint video HQ3: ' + str(asset))
+            raise FileNotFoundError('Thiếu checkpoint HQ-SAM cho video: ' + str(asset))
     if not annotations or not any(p.is_file() for p in annotations.values()):
         raise RuntimeError('Không có keyframe mask hợp lệ.')
     if not hasattr(torch, 'autocast'):
@@ -67,7 +69,7 @@ def run(job_file: Path):
     frame_runtime = []
     memory_samples = []
     report_path = Path(job.get('worker_report', output / 'track_worker_report.json'))
-    worker_report = {'version': 'M87', 'status': 'RUNNING', 'frames_expected': count,
+    worker_report = {'version': REPORT_VERSION, 'status': 'RUNNING', 'frames_expected': count,
                      'keyframe_indices': sorted(annotations), 'stages_sec': stages,
                      'gpu': None, 'memory_samples': memory_samples}
     def snapshot(stage, frame=None):
@@ -89,7 +91,7 @@ def run(job_file: Path):
     snapshot('before_model_load')
     model_t0 = now()
     emit({'event': 'status', 'stage': 'loading', 'percent': 1,
-          'message': 'Đang nạp HQ-SAM2 Video Predictor + HQ3 BEST...'})
+          'message': 'Đang nạp HQ-SAM2 Video Predictor + decoder đã fine-tune...'})
     # Follow the notebook exactly: base weights, then replace HQ decoder.
     with torch.inference_mode(False):
         model = build_sam2_hq_video_predictor(
@@ -99,9 +101,9 @@ def run(job_file: Path):
         )
         checkpoint = torch.load(str(best), map_location='cpu', weights_only=True)
         if (not isinstance(checkpoint, dict)
-                or checkpoint.get('format') != 'HQ2_HQSAM2_decoder_state_v2'
+                or checkpoint.get('format') != DECODER_FORMAT
                 or not isinstance(checkpoint.get('decoder'), dict)):
-            raise ValueError('HQ3 BEST không đúng định dạng decoder HQ-SAM2 của app.')
+            raise ValueError('Checkpoint decoder HQ-SAM không đúng định dạng của app.')
         model.sam_mask_decoder.load_state_dict(checkpoint['decoder'], strict=True)
         del checkpoint
     model.eval()
@@ -201,14 +203,14 @@ if __name__ == '__main__':
     _configure_stdio()
     try:
         if len(sys.argv) != 2:
-            raise ValueError('Usage: video_hq3_worker.py <job.json>')
+            raise ValueError('Usage: video_track_worker.py <job.json>')
         run(Path(sys.argv[1]))
     except BaseException as exc:
         try:
             job = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
             where = job.get('worker_report')
             if where:
-                dump_json(where, {'version': 'M87', 'status': 'ERROR',
+                dump_json(where, {'version': REPORT_VERSION, 'status': 'ERROR',
                                   'error': f'{type(exc).__name__}: {exc}',
                                   'traceback': traceback.format_exc()})
         except Exception:

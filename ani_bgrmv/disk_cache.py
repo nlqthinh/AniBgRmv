@@ -1,20 +1,19 @@
-"""Small local, private-to-this-Windows-user caches; never ship these with EXE.
+"""Small caches private to this Windows user; never ship them with the EXE.
 
-The batch cache keeps PNGs off RAM while a multi-image job awaits Save.
-SAM cache stores *embeddings* (not source images) to avoid another 1024px
-encoder inference after SAM sessions are unloaded on leaving Edit.
+- Batch cache: keeps cutout PNGs off RAM while a multi-image job awaits Save.
+- File digests: SHA-256 of large model files, remembered by (path, size,
+  mtime) so a ~1 GB HQ-SAM encoder is hashed once, not on every Edit session.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import tempfile
 import time
+from pathlib import Path
 
-import numpy as np
+from .hqsam_manifest import sha256_file
 
 
 def cache_root() -> Path:
@@ -42,80 +41,46 @@ def new_batch_cache() -> tempfile.TemporaryDirectory:
     return tempfile.TemporaryDirectory(prefix='job_', dir=parent)
 
 
-def _sam_cache_key(image_path: str, encoder_path: str) -> str:
-    """Invalidate when an image or encoder changes; never cache just by name."""
-    parts = []
-    for path in (image_path, encoder_path):
-        p = Path(path).resolve()
-        info = p.stat()
-        parts.append((str(p), info.st_size, info.st_mtime_ns))
-    payload = json.dumps(['sam-vitb-embedding-v1', parts], ensure_ascii=False)
-    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+def _digest_store() -> Path:
+    return cache_root() / 'file_digests.json'
 
 
-def load_sam_embedding(image_path: str, encoder_path: str):
+def cached_sha256(path: Path) -> str:
+    """SHA-256 of ``path``; recomputed only when its size or mtime changes."""
+    path = Path(path).resolve()
+    info = path.stat()
+    key = f'{path}|{info.st_size}|{info.st_mtime_ns}'
+    store = _digest_store()
     try:
-        path = cache_root() / 'sam_embeddings' / (_sam_cache_key(image_path, encoder_path) + '.npz')
-        with np.load(path, allow_pickle=False) as data:
-            embedding = np.asarray(data['embedding'], dtype=np.float32)
-            original_hw = tuple(int(x) for x in data['original_hw'])
-            resized_hw = tuple(int(x) for x in data['resized_hw'])
-        if embedding.shape != (1, 256, 64, 64):
-            return None
-        if len(original_hw) != 2 or len(resized_hw) != 2 or min(*original_hw, *resized_hw) < 1:
-            return None
-        os.utime(path, None)
-        return embedding, original_hw, resized_hw
-    except (OSError, ValueError, KeyError, EOFError, RuntimeError):
-        return None  # cache is optional; a corrupt cache must never break Edit
-
-
-def save_sam_embedding(image_path: str, encoder_path: str, predictor, max_mib: int = 128):
-    if getattr(predictor, 'embedding', None) is None:
-        return
-    target_dir = cache_root() / 'sam_embeddings'
-    target_dir.mkdir(parents=True, exist_ok=True)
-    destination = target_dir / (_sam_cache_key(image_path, encoder_path) + '.npz')
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=target_dir, suffix='.npz', delete=False) as fp:
-            temp_path = Path(fp.name)
-            np.savez_compressed(
-                fp,
-                embedding=predictor.embedding,
-                original_hw=np.asarray(predictor.original_hw, dtype=np.int32),
-                resized_hw=np.asarray(predictor.resized_hw, dtype=np.int32),
-            )
-        os.replace(temp_path, destination)
-        limit = max(16, max_mib) * 1024 * 1024
-        files = sorted(target_dir.glob('*.npz'), key=lambda p: p.stat().st_mtime)
-        used = sum(p.stat().st_size for p in files)
-        for old in files:
-            if used <= limit:
-                break
-            if old == destination and len(files) == 1:
-                break
-            n = old.stat().st_size
-            try:
-                old.unlink()
-                used -= n
-            except OSError:
-                pass
+        known = json.loads(store.read_text(encoding='utf-8'))
+        if not isinstance(known, dict):
+            known = {}
     except (OSError, ValueError):
-        pass  # a full disk must not block Guided Edit
-    finally:
-        if temp_path is not None:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        known = {}
+    if isinstance(known.get(key), str):
+        return known[key]
+    digest = sha256_file(path)
+    # Drop stale entries for the same file (older size/mtime).
+    known = {k: v for k, v in known.items() if not k.startswith(f'{path}|')}
+    known[key] = digest
+    try:
+        temporary = store.with_name(store.name + '.tmp')
+        temporary.write_text(json.dumps(known, indent=1), encoding='utf-8')
+        os.replace(temporary, store)
+    except OSError:
+        pass  # caching is optional; a read-only profile must not block Edit
+    return digest
 
 
 def clear_cache(kind: str = 'all') -> None:
-    """Optional manual cleanup; only known subdirectories can be removed."""
-    if kind not in ('all', 'batch', 'sam_embeddings'):
+    """Optional manual cleanup; only known cache entries can be removed."""
+    if kind not in ('all', 'batch', 'file_digests'):
         raise ValueError('Unknown cache type')
     root = cache_root()
-    names = ('batch', 'sam_embeddings') if kind == 'all' else (kind,)
-    for name in names:
-        shutil.rmtree(root / name, ignore_errors=True)
+    if kind in ('all', 'batch'):
+        shutil.rmtree(root / 'batch', ignore_errors=True)
+    if kind in ('all', 'file_digests'):
+        _digest_store().unlink(missing_ok=True)
+    # Embedding cache written by older releases (SAM ViT-B); no longer read.
+    if kind == 'all':
+        shutil.rmtree(root / 'sam_embeddings', ignore_errors=True)

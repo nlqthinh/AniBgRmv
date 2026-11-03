@@ -1,4 +1,4 @@
-"""Run F3 inside the *built EXE*, matching the GUI CUDA session settings.
+"""Run UNet inside the *built EXE*, matching the GUI CUDA session settings.
 
 Called as ``AniBGRmv.exe --cuda-selftest`` after PyInstaller COLLECT.
 Writes JSON even if the runw.exe build has no visible console. No PySide6.
@@ -12,7 +12,7 @@ import traceback
 
 
 def _report_path() -> Path:
-    return Path(sys.executable).resolve().parent / 'gpu_f3_selftest.json'
+    return Path(sys.executable).resolve().parent / 'gpu_selftest.json'
 
 
 def _test_impl() -> dict:
@@ -26,9 +26,9 @@ def _test_impl() -> dict:
     cfg = json.loads((root / 'app_config.json').read_text(encoding='utf-8'))
     model = root / cfg['model']['unet_onnx_path']
     if not model.is_file():
-        raise RuntimeError(f'M78: bundled F3 model missing: {model}')
+        raise RuntimeError(f'Bundled UNet model missing: {model}')
     if 'CUDAExecutionProvider' not in ort.get_available_providers():
-        raise RuntimeError(f'M78: CUDAExecutionProvider unavailable: {ort.get_available_providers()}')
+        raise RuntimeError(f'CUDAExecutionProvider unavailable: {ort.get_available_providers()}')
     so = ort.SessionOptions()
     so.enable_cpu_mem_arena = False
     so.enable_mem_pattern = False
@@ -40,9 +40,9 @@ def _test_impl() -> dict:
                                 providers=[('CUDAExecutionProvider', opts)])
     sess.disable_fallback()
     if 'CUDAExecutionProvider' not in sess.get_providers():
-        raise RuntimeError(f'M78: CUDAExecutionProvider not initialized: {sess.get_providers()}')
+        raise RuntimeError(f'CUDAExecutionProvider not initialized: {sess.get_providers()}')
     input_name = sess.get_inputs()[0].name
-    # Same shape as the app's F3 letterbox image. Two values exercise both
+    # Same shape as the app's UNet letterbox image. Two values exercise both
     # first-run cuDNN graph build and subsequent execution, with real data.
     samples = [np.zeros((1,3,768,768), np.float32),
                np.random.default_rng(20261031).uniform(0.0, 1.0, (1,3,768,768)).astype(np.float32)]
@@ -50,7 +50,7 @@ def _test_impl() -> dict:
     for x in samples:
         y = sess.run(None, {input_name:x})
         if not y or not np.isfinite(y[0]).all():
-            raise RuntimeError('M78: F3 CUDA output missing or nonfinite')
+            raise RuntimeError('UNet CUDA output missing or nonfinite')
         outputs.append(list(y[0].shape))
     trace = Path(sess.end_profiling())
     try:
@@ -62,7 +62,7 @@ def _test_impl() -> dict:
     gpu_convs = [e for e in convs if e.get('args', {}).get('provider') == 'CUDAExecutionProvider']
     cpu_convs = [e for e in convs if e.get('args', {}).get('provider') != 'CUDAExecutionProvider']
     if not gpu_convs or cpu_convs:
-        raise RuntimeError(f'M78: F3 Conv GPU strict: CUDA={len(gpu_convs)} CPU/other={len(cpu_convs)}')
+        raise RuntimeError(f'UNet Conv GPU strict: CUDA={len(gpu_convs)} CPU/other={len(cpu_convs)}')
     return {
         'status': 'PASS', 'ort_version': ort.__version__,
         'cudnn_version': cudnn_version(),
@@ -93,7 +93,7 @@ def main() -> int:
     try:
         _report_path().write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding='utf-8')
     except OSError as exc:
-        print(f'M78 could not write selftest report: {exc}', file=sys.stderr)
+        print(f'Could not write selftest report: {exc}', file=sys.stderr)
         return 1
-    print(f"[M78 {result['status']}] Frozen F3 CUDA selftest. See {_report_path()}", flush=True)
+    print(f"[{result['status']}] Frozen UNet CUDA selftest. See {_report_path()}", flush=True)
     return code

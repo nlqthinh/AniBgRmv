@@ -1,0 +1,21 @@
+{
+  "version": "M87",
+  "status": "ERROR",
+  "action": "track",
+  "clip": {
+    "name": "clip.mp4",
+    "frames": 3,
+    "proxy_hw": [
+      12,
+      18
+    ],
+    "output_fps": 3
+  },
+  "keyframes": [
+    1
+  ],
+  "samples": [],
+  "errors": [],
+  "error": "RuntimeError: HQ-SAM2 Video Predictor thất bại (exit 1): Đường dẫn checkpoint không hợp lệ",
+  "total_sec": 0.845
+}

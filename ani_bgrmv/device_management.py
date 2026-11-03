@@ -1,4 +1,4 @@
-"""Persisted CPU/GPU selection; F3, M7 and both SAM graphs run on ONNX Runtime.
+"""Persisted CPU/GPU selection; every image model runs on ONNX Runtime.
 
 Strict GPU (A) means NVIDIA CUDA and never fallback to CPU; AMD/Intel are
 visible in GPU Check but not supported by this release.
@@ -61,18 +61,17 @@ def cuda_index(selection):
         raise RuntimeError("Đây là CPU Edition, không chứa CUDA. Cần GPU Edition để dùng NVIDIA.")
     match = re.fullmatch(r"cuda:(0|[1-9][0-9]*)", selection.get("gpu_id") or "")
     if match is None:
-        raise RuntimeError("GPU đã chọn chưa hỗ trợ CUDA ONNX cho F3/M7/SAM. Chọn GPU NVIDIA bằng GPU Check.")
+        raise RuntimeError("GPU đã chọn chưa hỗ trợ CUDA ONNX. Chọn GPU NVIDIA bằng GPU Check.")
     return int(match.group(1))
 
 
-# M78: use exactly the same CUDA/cuDNN loader in GUI and frozen self-test.
-# The loader is invoked by the PyInstaller runtime hook before GUI startup.
+# Same CUDA/cuDNN loader as the frozen self-test and the PyInstaller hook.
 def preload_cuda_runtime():
     from .cuda_bundle_runtime import preload_runtime
     preload_runtime()
 
 
-def verify_gpu_for_sam(selection):
+def verify_gpu(selection):
     """Check strict ONNX CUDA prerequisites, without importing PyTorch.
 
     Model/session execution is checked separately by ONNX Runtime when loaded.
@@ -84,10 +83,9 @@ def verify_gpu_for_sam(selection):
             f"onnxruntime {ort.__version__} không có CUDAExecutionProvider. "
             "Cần onnxruntime-gpu CUDA phù hợp; không fallback CPU."
         )
-    # Check the ACTUAL selected backend; HQ3 ONNX must not require legacy
-    # SAM ViT-B graphs, and HQ3 Torch must not need non-selected ONNX files.
-    from .app_config import sam_runtime_assets
-    for label, path in sam_runtime_assets():
+    # GPU mode always offers HQ-SAM Guided Edit: its files must exist.
+    from .app_config import guided_model_assets
+    for label, path in guided_model_assets():
         if not Path(path).is_file():
             raise RuntimeError(f"Không tìm thấy {label}: {path}.")
 
@@ -196,8 +194,7 @@ class GpuScanThread(QThread):
         return [{"name": str(v.get("Name") or "GPU"), "pnp": str(v.get("PNPDeviceID") or "")} for v in data if isinstance(v, dict) and v.get("Name")]
 
     def _cuda_adapters(self):
-        # nvidia-smi uses the CUDA/driver GPU index. Validate against PyTorch
-        # again when loading the model (important if CUDA_VISIBLE_DEVICES differs).
+        # nvidia-smi uses the CUDA/driver GPU index (verify_gpu re-checks it).
         exe = shutil.which("nvidia-smi")
         if not exe and os.name == "nt":
             candidate = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe"
@@ -213,8 +210,7 @@ class GpuScanThread(QThread):
                 return devices
             except (ValueError, RuntimeError, TimeoutError):
                 pass
-        # nvidia-smi is the authoritative CUDA index source here; avoid
-        # importing PyTorch just to enumerate devices (not shipped in EXE).
+        # nvidia-smi is the authoritative CUDA index source; no PyTorch import.
         return []
 
     def run(self):

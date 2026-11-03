@@ -2,20 +2,19 @@
   "_note": "Relative paths are resolved from the folder containing app.py or AniBGRmv.exe. On Windows, using forward slash paths is recommended, for example: D:/AniBGRmv/output/single_saved",
   "model": {
     "unet_onnx_path": "models/F3_A1_letterbox_constant_768_best.onnx",
-    "vitmatte_onnx_path": "models/m7_vitmatte_letterbox_best.onnx"
+    "vitmatte_unet_onnx_path": "models/m7_vitmatte_letterbox_best.onnx"
   },
   "sam": {
-    "encoder_onnx_path": "models/sam_vit_b_encoder.onnx",
-    "decoder_onnx_path": "models/sam_vit_b_decoder.onnx",
-    "model_type": "vit_b",
-    "device": "auto",
+    "hqsam_encoder_onnx_path": "models/hq3_hqsam2_encoder.onnx",
+    "hqsam_decoder_onnx_path": "models/hq3_hqsam2_decoder.onnx",
+    "vitmatte_sam_onnx_path": "models/m71_hq3_d0d_best.onnx",
+    "hqsam_base_checkpoint_path": "models/sam2.1_hq_hiera_large.pt",
+    "hqsam_decoder_checkpoint_path": "models/hq3_best_overall.pt",
     "guided_timeout_ms": 0,
-    "backend": "hq3_onnx",
-    "hq3_decoder_checkpoint_path": "models/hq3_best_overall.pt",
-    "m71_onnx_path": "models/m71_hq3_d0d_best.onnx",
-    "hq2_refine_with_m7": true,
-    "hq3_encoder_onnx_path": "models/hq3_hqsam2_encoder.onnx",
-    "hq3_decoder_onnx_path": "models/hq3_hqsam2_decoder.onnx"
+    "refine_each_stroke": true,
+    "small_object_crop": true,
+    "cpu_guided_backend": "grabcut",
+    "cpu_matting_model": "vitmatte_unet"
   },
   "output": {
     "single_output_dir": "output/single_saved",

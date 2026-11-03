@@ -1,4 +1,4 @@
-"""M78: deterministic CUDA/cuDNN loading in the PyInstaller GPU edition.
+"""Deterministic CUDA/cuDNN loading in the PyInstaller GPU edition.
 
 No PySide6 or PyTorch import. On Windows, validate actual loaded module paths,
 not merely CUDAExecutionProvider availability. Development mode keeps the
@@ -43,7 +43,6 @@ def loaded_module_path(name: str) -> str | None:
 
 
 def loaded_cuda_modules() -> dict[str, str]:
-    from pathlib import Path
     found = {}
     for name in _DLL_NAMES + ('cublas64_12.dll', 'cublasLt64_12.dll',
                               'cudart64_12.dll', 'nvrtc64_120_0.dll'):
@@ -56,7 +55,7 @@ def loaded_cuda_modules() -> dict[str, str]:
 def _require_bundled_cudnn(bundled: Path) -> None:
     for name in ('cudnn64_9.dll', 'cudnn_graph64_9.dll', 'cudnn_ops64_9.dll'):
         if not (bundled / name).is_file():
-            raise RuntimeError(f'M78: CUDA bundle missing {name}: {bundled}')
+            raise RuntimeError(f'CUDA bundle missing {name}: {bundled}')
 
 
 def _check_module_paths(bundled: Path) -> None:
@@ -66,7 +65,7 @@ def _check_module_paths(bundled: Path) -> None:
             continue
         if Path(actual).resolve().parent != expected:
             raise RuntimeError(
-                f'M78: CUDA DLL loaded from wrong directory: {name} = {actual}; '
+                f'CUDA DLL loaded from wrong directory: {name} = {actual}; '
                 f'expected {bundled / name}. Another CUDA distribution is shadowing the EXE.'
             )
 
@@ -87,7 +86,7 @@ def preload_runtime():
     base = Path(getattr(sys, '_MEIPASS', Path(sys.executable).resolve().parent))
     bundled = base / 'gpu_runtime'
     if not bundled.is_dir():
-        raise RuntimeError(f'M78: bundled gpu_runtime missing: {bundled}')
+        raise RuntimeError(f'bundled gpu_runtime missing: {bundled}')
     _require_bundled_cudnn(bundled)
 
     # Register the directory *before* importing ORT. Dynamic cuDNN backend
@@ -106,10 +105,10 @@ def preload_runtime():
                 _HANDLES.append(ctypes.WinDLL(str(candidate)))
             except OSError as exc:
                 if name in ('cudnn64_9.dll', 'cudnn_ops64_9.dll', 'cudnn_graph64_9.dll'):
-                    raise RuntimeError(f'M78: could not preload required {candidate}: {exc}') from exc
+                    raise RuntimeError(f'could not preload required {candidate}: {exc}') from exc
                 # Some optional cuDNN engines require NVRTC at load time.
-                # They may be unused for F3; the frozen F3 selftest is the gate.
-                print(f'[M78 WARN] optional cuDNN plugin unavailable: {name}: {exc}', flush=True)
+                # They may be unused by UNet; the frozen UNet selftest is the gate.
+                print(f'[WARN] optional cuDNN plugin unavailable: {name}: {exc}', flush=True)
 
     import onnxruntime as ort
     if hasattr(ort, 'preload_dlls'):

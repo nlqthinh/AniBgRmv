@@ -55,9 +55,6 @@ class GuidedEditWorker(QObject):
         stroke_points: list[tuple[float, float]],
         brush_size: int,
         operation: str,
-        sam_checkpoint_path: str,
-        sam_model_type: str,
-        sam_device: str,
         prompt_box: tuple[int, int, int, int] | None = None,
     ):
         super().__init__()
@@ -67,9 +64,6 @@ class GuidedEditWorker(QObject):
         self.stroke_points = stroke_points
         self.brush_size = brush_size
         self.operation = operation
-        self.sam_checkpoint_path = sam_checkpoint_path
-        self.sam_model_type = sam_model_type
-        self.sam_device = sam_device
         self.prompt_box = prompt_box
         self.cancel_requested = False
 
@@ -82,22 +76,14 @@ class GuidedEditWorker(QObject):
                 self.canceled.emit()
                 return
 
-            result = self.engine.apply_sam_guided_edit(
+            # Paint and Box share the same stage progress, queued to the GUI thread.
+            result = self.engine.apply_guided_edit(
                 image_path=self.image_path,
                 current_alpha=self.current_alpha,
                 stroke_points=self.stroke_points,
                 prompt_box=self.prompt_box,
                 brush_size=self.brush_size,
                 operation=self.operation,
-                sam_checkpoint_path=self.sam_checkpoint_path,
-                sam_model_type=self.sam_model_type,
-                sam_device=self.sam_device,
-                # M22: do not run ViTMatte on every guided stroke.
-                # It made edit mode extremely slow on CPU.
-                # Guided edit now uses SAM for local region selection, then applies alpha directly.
-                refine_with_vitmatte=False,
-                # Both Guided Paint and Guided Box share the same stage progress.
-                # This signal is queued to the GUI thread by Qt.
                 progress_callback=self.progress.emit,
             )
 
@@ -107,6 +93,45 @@ class GuidedEditWorker(QObject):
 
             self.progress.emit(100, "Đã hoàn tất")
             self.finished.emit(result)
+        except Exception:
+            self.error.emit(traceback.format_exc())
+
+
+class MattingWorker(QObject):
+    """One on-demand CPU matting pass; same signals as GuidedEditWorker.
+
+    Cancellation is cooperative: ONNX Runtime may finish its current run,
+    but a canceled result is never applied to the GUI alpha.
+    """
+    progress = Signal(int, str)
+    finished = Signal(dict)
+    canceled = Signal()
+    error = Signal(str)
+
+    def __init__(self, engine: BgRemoveEngine, image_path: str, current_alpha: np.ndarray):
+        super().__init__()
+        self.engine = engine
+        self.image_path = image_path
+        self.current_alpha = np.asarray(current_alpha, dtype=np.uint8).copy()
+        self.cancel_requested = False
+
+    def cancel(self):
+        self.cancel_requested = True
+
+    def run(self):
+        try:
+            if self.cancel_requested:
+                self.canceled.emit()
+                return
+            prediction = self.engine.matte_current_alpha(
+                self.image_path, self.current_alpha,
+                progress_callback=self.progress.emit,
+            )
+            if self.cancel_requested:
+                self.canceled.emit()
+                return
+            self.progress.emit(100, 'Matting hoàn tất')
+            self.finished.emit(prediction)
         except Exception:
             self.error.emit(traceback.format_exc())
 
@@ -147,8 +172,8 @@ class BatchCutWorker(QObject):
                     return
 
                 if self.batch_cache_dir is not None:
-                    # Release mode: do not keep N full-resolution RGBA PIL
-                    # images and masks in the Qt signal/result list.
+                    # Release mode: keep N full-resolution cutouts on disk,
+                    # not in the Qt signal/result list.
                     self.batch_cache_dir.mkdir(parents=True, exist_ok=True)
                     cached_path = self.batch_cache_dir / f'{idx:04d}_cutout.png'
                     compact_cutout = self.engine.optimize_cutout_png(result['cutout_pil'])
@@ -212,10 +237,8 @@ class BatchSaveWorker(QObject):
                 out_dir = Path(self.output_dir)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 log_path = out_dir / "batch_log.csv"
-                # The batch report does not require pandas. Removing its only
-                # import avoids bundling pandas and optional scientific stacks.
-                # DictWriter preserves the old column insertion order and
-                # handles fields appearing only in later saved predictions.
+                # stdlib csv (no pandas); columns in first-seen order, including
+                # fields that appear only in later saved predictions.
                 columns = list(dict.fromkeys(key for item in logs for key in item))
                 with log_path.open('w', newline='', encoding='utf-8-sig') as stream:
                     if columns:

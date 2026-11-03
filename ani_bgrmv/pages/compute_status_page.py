@@ -6,6 +6,8 @@ from ..device_management import GpuScanThread, current_selection
 from ..portable_device_settings import build_variant
 from ..styles import apply_button_style
 
+CPU_EDITION_NOTE = 'CPU Edition: không chứa CUDA. Guided mặc định dùng GrabCut.'
+
 
 class ComputeStatusPage(QWidget):
     backRequested = Signal()
@@ -49,7 +51,7 @@ class ComputeStatusPage(QWidget):
         self.gpu_box.setStyleSheet("font-size: 15px; padding: 6px; color: #F5F7FA; background-color: #252E3B; border: 1px solid #8A96A7; border-radius: 8px;")
         self.gpu_box.setVisible(False)
         self.check_status = QLabel(
-            'CPU Lite: không chứa CUDA hoặc SAM/HQ2. Guided sử dụng GrabCut.'
+            CPU_EDITION_NOTE
             if build_variant() == 'cpu' else ''
         )
         self.check_status.setAlignment(Qt.AlignCenter)
@@ -103,7 +105,7 @@ class ComputeStatusPage(QWidget):
         if selection["mode"] != "gpu":
             self.gpu_box.setVisible(False)
             self.check_status.setText(
-                'CPU Lite: không chứa CUDA hoặc SAM/HQ2. Guided sử dụng GrabCut.'
+                CPU_EDITION_NOTE
                 if build_variant() == 'cpu' else ''
             )
 
@@ -125,7 +127,7 @@ class ComputeStatusPage(QWidget):
                 self._stop_scan()
             self.gpu_box.setVisible(False)
             self.check_status.setText(
-                'CPU Lite: không chứa CUDA hoặc SAM/HQ2. Guided sử dụng GrabCut.'
+                CPU_EDITION_NOTE
                 if build_variant() == 'cpu' else ''
             )
             self.selectionRequested.emit({"mode": "cpu", "gpu_id": None, "gpu_name": None})
@@ -141,7 +143,7 @@ class ComputeStatusPage(QWidget):
         selection = {"mode": "gpu", "gpu_id": self.gpu_box.itemData(index),
                      "gpu_name": self.gpu_box.itemText(index)}
         if not str(selection["gpu_id"]).startswith("cuda:"):
-            self.check_status.setText("GPU này không hỗ trợ chế độ A: F3/M7 và Guided phải dùng cùng NVIDIA GPU. Không fallback CPU.")
+            self.check_status.setText("GPU này không hỗ trợ chế độ GPU: mọi model phải chạy trên cùng NVIDIA GPU. Không fallback CPU.")
         else:
             self.check_status.setText("")
         self.selectionRequested.emit(selection)

@@ -1,4 +1,4 @@
-"""Parent-process adapter for HQ3 native SAM2 temporal video propagation.
+"""Parent-process adapter for native HQ-SAM2 temporal video propagation.
 
 The subprocess owns PyTorch memory. Cancelling terminates the child, then its
 temporary masks are removed. Existing image ONNX sessions and GUI stay intact.
@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import time
-import traceback
 import os
 import queue
 import subprocess
@@ -20,9 +19,10 @@ import cv2
 import numpy as np
 
 from .video_pipeline import VideoCanceled, VideoFormatError, _check_cancel
-from .video_diagnostics import dump_json, dump_csv, ram_mib, create_run, gpu_snapshot, process_cpu_seconds
+from .video_diagnostics import (REPORT_VERSION, dump_json, dump_csv, ram_mib, create_run,
+                                gpu_snapshot, process_cpu_seconds)
 
-PREFIX = '__ANIBGRMV_HQ3_TRACK__'
+PREFIX = '__ANIBGRMV_VIDEO_TRACK__'
 
 
 def _resolve_model(raw: str) -> Path:
@@ -42,14 +42,14 @@ def _resolve_model(raw: str) -> Path:
 def _worker_script() -> Path:
     # In a frozen EXE, package this pure .py file as data (not a PyInstaller
     # bytecode module): external Python must be able to execute it directly.
-    script = Path(__file__).resolve().with_name('video_hq3_worker.py')
+    script = Path(__file__).resolve().with_name('video_track_worker.py')
     if script.is_file():
         return script
     script = (Path(getattr(sys, '_MEIPASS', '')) / 'ani_bgrmv' / 'engine'
-              / 'video_hq3_worker.py')
+              / 'video_track_worker.py')
     if script.is_file():
         return script
-    raise VideoFormatError('Thiếu file video_hq3_worker.py của HQ-SAM2 Video Predictor.')
+    raise VideoFormatError('Thiếu file video_track_worker.py của HQ-SAM2 Video Predictor.')
 
 
 def _python_runner() -> Path:
@@ -62,7 +62,7 @@ def _python_runner() -> Path:
         return py
     if getattr(sys, 'frozen', False):
         raise VideoFormatError(
-            'GPU EXE M81/M83 không đóng gói PyTorch Video Predictor. '
+            'GPU EXE không đóng gói PyTorch Video Predictor. '
             'Hãy thiết lập video.tracker_python_path trong app_config.json '
             'đến .venv\\Scripts\\python.exe có torch và HQ-SAM2, '
             'hoặc chạy python app.py từ project. Không tự fallback Optical Flow.'
@@ -70,13 +70,13 @@ def _python_runner() -> Path:
     return Path(sys.executable)
 
 
-def track_hq3_video(clip, keyframes, progress=None, cancel=None, report_dir=None):
+def track_video(clip, keyframes, progress=None, cancel=None, report_dir=None):
     from ..app_config import APP_CONFIG
     _check_cancel(cancel)
     started = time.perf_counter()
     diag = Path(report_dir) if report_dir else create_run(Path(clip.source).parent, 'track')
     diag.mkdir(parents=True, exist_ok=True)
-    report = {'version': 'M87', 'status': 'RUNNING', 'action': 'track',
+    report = {'version': REPORT_VERSION, 'status': 'RUNNING', 'action': 'track',
               'clip': {'name': Path(clip.source).name, 'frames': clip.count,
                        'proxy_hw': [clip.proxy_height, clip.proxy_width],
                        'output_fps': clip.output_fps},
@@ -88,17 +88,16 @@ def track_hq3_video(clip, keyframes, progress=None, cancel=None, report_dir=None
                mask.shape == (clip.proxy_height, clip.proxy_width)
                for idx, mask in keyframes.items()):
         raise VideoFormatError('Keyframe mask không khớp video.')
-    sam = APP_CONFIG.get('sam', {})
-    base = _resolve_model(sam.get('hq2_base_checkpoint_path', 'models/sam2.1_hq_hiera_large.pt'))
-    decoder = _resolve_model(sam.get('hq3_decoder_checkpoint_path', 'models/hq3_best_overall.pt'))
+    base = _resolve_model(APP_CONFIG['sam']['hqsam_base_checkpoint_path'])
+    decoder = _resolve_model(APP_CONFIG['sam']['hqsam_decoder_checkpoint_path'])
     missing = [str(p) for p in (base, decoder) if not p.is_file()]
     if missing:
         raise VideoFormatError(
             'SAM2 Video Predictor cần checkpoint PyTorch đầy đủ: '\
-            + ', '.join(missing) + '. Hai graph HQ3 ONNX ảnh tĩnh không thay thế được bộ nhớ video.'
+            + ', '.join(missing) + '. Hai graph HQ-SAM ONNX ảnh tĩnh không thay thế được bộ nhớ video.'
         )
     script, python = _worker_script(), _python_runner()
-    with tempfile.TemporaryDirectory(prefix='anibgrmv_hq3_track_') as tmp:
+    with tempfile.TemporaryDirectory(prefix='anibgrmv_video_track_') as tmp:
         staging = Path(tmp)
         in_dir = staging / 'keyframes'
         out_dir = staging / 'masks'
@@ -111,7 +110,7 @@ def track_hq3_video(clip, keyframes, progress=None, cancel=None, report_dir=None
                 raise OSError('Không lưu được keyframe mask ' + str(idx))
             paths[str(idx)] = str(destination)
         job = dict(base_checkpoint=str(base.resolve()),
-                   hq3_decoder_checkpoint=str(decoder.resolve()),
+                   decoder_checkpoint=str(decoder.resolve()),
                    frames_dir=str(Path(clip.temp_dir).resolve()),
                    frame_count=clip.count,
                    hw=[clip.proxy_height, clip.proxy_width],
@@ -121,7 +120,7 @@ def track_hq3_video(clip, keyframes, progress=None, cancel=None, report_dir=None
         job_file = staging / 'job.json'
         job_file.write_text(json.dumps(job, ensure_ascii=False), encoding='utf-8')
         # Windows may default redirected child stdout to cp1252/cp1258. The
-        # M84 protocol includes Vietnamese text, so force UTF-8 in the child
+        # The progress protocol includes Vietnamese text, so force UTF-8 in the child
         # rather than relying on the parent pipe's decoding configuration.
         child_env = os.environ.copy()
         child_env['PYTHONIOENCODING'] = 'utf-8:backslashreplace'
@@ -177,7 +176,7 @@ def track_hq3_video(clip, keyframes, progress=None, cancel=None, report_dir=None
                     elif obj.get('event') == 'complete':
                         completed = True
                     if progress and 'percent' in obj:
-                        progress(int(obj['percent']), str(obj.get('message', 'HQ3 Track')))
+                        progress(int(obj['percent']), str(obj.get('message', 'Video Track')))
                 elif line.strip():
                     log_tail.append(line[:240])
                     log_tail = log_tail[-12:]

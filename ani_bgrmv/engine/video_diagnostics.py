@@ -1,4 +1,4 @@
-"""M87: persistent per-job logs; never put Python checkpoints or image pixels in logs."""
+"""Persistent per-job video logs; never put checkpoints or image pixels in logs."""
 from __future__ import annotations
 
 import csv
@@ -9,6 +9,8 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+REPORT_VERSION = 'video-report-v1'
 
 
 def create_run(output_dir, kind):

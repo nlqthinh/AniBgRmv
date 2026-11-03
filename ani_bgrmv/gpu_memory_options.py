@@ -1,4 +1,4 @@
-"""GPU ONNX Runtime memory controls for AniBgRmv M48.
+"""GPU ONNX Runtime memory controls.
 
 This module does not import ONNX Runtime, PyTorch, or allocate GPU memory.
 It only returns documented CUDAExecutionProvider option values.

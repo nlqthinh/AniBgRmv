@@ -1,0 +1,27 @@
+{
+  "_note": "Relative paths are resolved from the folder containing app.py or AniBGRmv.exe. On Windows, using forward slash paths is recommended, for example: D:/AniBGRmv/output/single_saved",
+  "model": {
+    "unet_onnx_path": "models/F3_A1_letterbox_constant_768_best.onnx",
+    "vitmatte_onnx_path": "models/m7_vitmatte_letterbox_best.onnx"
+  },
+  "sam": {
+  "encoder_onnx_path": "models/sam_vit_b_encoder.onnx",
+  "decoder_onnx_path": "models/sam_vit_b_decoder.onnx",
+  "model_type": "vit_b",
+  "device": "auto",
+  "guided_timeout_ms": 0
+  } ,
+  "output": {
+    "single_output_dir": "output/single_saved",
+    "batch_output_dir": "output/batch_saved",
+    "save_debug_outputs": true
+  },
+  "batch": {
+    "max_batch_images": 30
+  },
+  "compute": {
+    "mode": "gpu",
+    "gpu_id": "cuda:0",
+    "gpu_name": "NVIDIA GeForce GTX 1650"
+  }
+}

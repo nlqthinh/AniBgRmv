@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QLabel, QMessageBox, QStackedWidget, QVBoxLayout, 
 
 from bg_engine import BgRemoveEngine
 
-from .app_config import F2_A1_ONNX_PATH, M6_ONNX_PATH, get_config_path
+from .app_config import UNET_ONNX_PATH, VITMATTE_UNET_ONNX_PATH, get_config_path
 from .device_management import current_selection, cuda_index, save_selection
 from .pages.batch_cut_page import BatchCutPage
 from .pages.compute_status_page import ComputeStatusPage
@@ -26,8 +26,8 @@ class ModelLoadWorker(QObject):
     def run(self):
         try:
             engine = BgRemoveEngine(
-                f2a1_model_path=F2_A1_ONNX_PATH,
-                m6_model_path=M6_ONNX_PATH,
+                unet_model_path=UNET_ONNX_PATH,
+                vitmatte_unet_model_path=VITMATTE_UNET_ONNX_PATH,
                 size=768,
                 compute_selection=self.selection,
             )
@@ -40,7 +40,7 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("AniBgRmvMainWindow")
-        self.setWindowTitle("Anime Background Remover - F3 → ViTMatte M7")
+        self.setWindowTitle("Anime Background Remover - UNet → ViTMatte")
         screen_rect = QGuiApplication.primaryScreen().availableGeometry()
         start_w = min(1120, max(960, int(screen_rect.width() * 0.90)))
         start_h = min(760, max(640, int(screen_rect.height() * 0.88)))
@@ -63,7 +63,7 @@ class MainWindow(QWidget):
         self.batch_page = BatchCutPage(self.get_engine)
         self.video_page = VideoCutPage(self.get_engine)
         self.compute_page = ComputeStatusPage()
-        # M49: stable page selectors for dark backgrounds, independent of OS theme.
+        # Stable page selectors for dark backgrounds, independent of OS theme.
         self.home_page.setObjectName("AniBgRmvHomePage")
         self.single_page.setObjectName("AniBgRmvSinglePage")
         self.batch_page.setObjectName("AniBgRmvBatchPage")

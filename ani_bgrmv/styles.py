@@ -144,7 +144,7 @@ def apply_button_style(button: QPushButton, primary: bool = False):
 # SMALL HELPERS
 # =========================
 
-# M49 — theme cố định, không phụ thuộc Windows light/dark mode.
+# Theme cố định, không phụ thuộc Windows light/dark mode.
 # Giữ canvas upload/Edit màu sáng để xem ảnh rõ; phần giao diện bên ngoài tối.
 APP_DARK_BG = "#171B22"
 APP_TEXT_COLOR = "#F5F7FA"
@@ -209,7 +209,7 @@ def apply_fixed_dark_theme(app: QApplication) -> None:
 
 
 
-# M73: Selected Guided/Manual and Paint/Box toggles are blue on dark UI.
+# Selected Guided/Manual and Paint/Box toggles are blue on dark UI.
 EDIT_MODE_BUTTON_STYLE = EDIT_BLACK_BUTTON_STYLE + """
 QPushButton:checked {
     border: 2px solid #3299FF;

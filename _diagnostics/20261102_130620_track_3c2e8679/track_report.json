@@ -1,0 +1,24 @@
+{
+  "version": "M87",
+  "status": "OK",
+  "action": "track",
+  "clip": {
+    "name": "clip.mp4",
+    "frames": 3,
+    "proxy_hw": [
+      12,
+      18
+    ],
+    "output_fps": 3
+  },
+  "keyframes": [
+    1
+  ],
+  "samples": [],
+  "errors": [],
+  "duplicate_rgb_reuses": 2,
+  "conflicting_duplicate_keyframes": 0,
+  "worker_memory_samples": [],
+  "total_sec": 0.939,
+  "avg_total_sec_per_frame": 0.313
+}
