@@ -99,6 +99,12 @@ data/
 .m71_export_deps/
 # Bước 0 annotation outputs (reports, packs with features/EXE copies).
 step0_output/
+# Video Track/Export reports written next to the output (or by tests).
+_diagnostics/
+
+# Release archives (tools/package_release.py).
+/release/
+/annotation_output
 /tools
 /tests
 /bat

@@ -43,26 +43,20 @@ def split_alpha(alpha: np.ndarray, min_object_ratio: float = DEFAULT_MIN_OBJECT_
     relabel[order + 1] = np.arange(1, count, dtype=np.int32)
     labels = relabel[regions]
     if count > 1:
-        _attach_soft_pixels(labels, alpha)
+        fill_from_nearest(labels, (alpha > 0) & (labels == 0))
     sorted_areas = tuple(int(a) for a in areas[order])
     object_count = sum(a >= min_object_ratio * alpha.size for a in sorted_areas)
     return AlphaSplit(labels, int(object_count), sorted_areas)
 
 
-def _attach_soft_pixels(labels: np.ndarray, alpha: np.ndarray) -> None:
-    """Give every 0 < alpha < SOLID_ALPHA pixel the label of its nearest region."""
-    soft = (alpha > 0) & (labels == 0)
-    if not soft.any():
-        return
+def fill_from_nearest(labels: np.ndarray, targets: np.ndarray) -> None:
+    """Give every ``targets`` pixel the label of its nearest pixel with a label > 0."""
     seeds = labels > 0
+    if not targets.any() or not seeds.any():
+        return
     # Each seed pixel gets its own id; every other pixel gets its nearest seed's id.
     _, nearest = cv2.distanceTransformWithLabels((~seeds).astype(np.uint8), cv2.DIST_L2, 5,
                                                  labelType=cv2.DIST_LABEL_PIXEL)
     seed_label = np.zeros(int(nearest.max()) + 1, np.int32)
     seed_label[nearest[seeds]] = labels[seeds]
-    labels[soft] = seed_label[nearest[soft]]
-
-
-def instance_alpha(alpha: np.ndarray, split: AlphaSplit, label: int) -> np.ndarray:
-    """Original 256-level alpha of one region, zero elsewhere."""
-    return np.where(split.labels == label, alpha, 0).astype(np.uint8)
+    labels[targets] = seed_label[nearest[targets]]

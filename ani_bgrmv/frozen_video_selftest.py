@@ -22,13 +22,13 @@ def main() -> int:
     record = {'passed': False, 'mode': 'video_selftest', 'opencv': cv2.__version__}
     try:
         # GPU edition must contain the standalone sidecar script for the
-        # user-configured external PyTorch Python. CPU Lite does not ship it.
+        # user-configured external PyTorch Python, for either CPU/GPU edition.
         if getattr(sys, 'frozen', False):
             bundle = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent))
             flavor_path = bundle / 'build_flavor.json'
             if flavor_path.is_file():
                 flavor = json.loads(flavor_path.read_text(encoding='utf-8')).get('variant')
-                if flavor == 'gpu':
+                if flavor in ('gpu', 'cpu'):
                     for name in VIDEO_SIDECARS:
                         sidecar = bundle / 'ani_bgrmv/engine' / name
                         if not sidecar.is_file():

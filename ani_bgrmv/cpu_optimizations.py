@@ -2,10 +2,9 @@
 import os
 
 
-def cpu_session_options():
+def cpu_session_options(settings):
+    """``settings`` is the 'compute' section of app_config.json."""
     import onnxruntime as ort
-    from .app_config import APP_CONFIG
-    settings = APP_CONFIG.get('compute', {})
     requested = settings.get('cpu_threads', 2)
     try:
         requested = int(requested)

@@ -8,6 +8,9 @@ Model names describe architecture + role, not experiment IDs:
   ViTMatte-UNet  matting refinement for UNet masks (automatic cut)
   HQ-SAM         HQ-SAM2 Large, prompt (Paint/Box) segmentation for Guided Edit
   ViTMatte-SAM   matting refinement for HQ-SAM masks (Guided Edit, video export)
+
+Code reads model files through model_registry.model_path(role), never from
+the keys below directly.
 """
 import json
 import shutil
@@ -44,9 +47,6 @@ DEFAULT_APP_CONFIG = {
         # ONNX Runtime returns idle CUDA arena memory after each run.
         "shrink_gpu_arena_after_run": True,
         "log_timing": False,
-        # CPU Guided selector: "grabcut" (fast) or "hqsam" (best quality,
-        # needs one HQ-SAM encoder pass per image).
-        "cpu_guided_backend": "grabcut",
         # CPU "Matting" button model: "off", "vitmatte_unet" or "vitmatte_sam".
         "cpu_matting_model": "vitmatte_unet",
     },
@@ -56,6 +56,9 @@ DEFAULT_APP_CONFIG = {
         "video_output_dir": "output/video_saved",
         "save_debug_outputs": True,
         "show_debug_button": True,
+        # Recolour soft edges (hair, anti-aliased lines) so cutouts and video
+        # exports do not keep a fringe of the old background. Images and video.
+        "foreground_estimation": True,
     },
     "video": {
         # Video Track runs in a separate Python that has PyTorch + HQ-SAM2.
@@ -63,11 +66,31 @@ DEFAULT_APP_CONFIG = {
         "tracker_python_path": "",
         # "auto" = vitmatte_sam on GPU, binary on CPU; or "vitmatte_sam"/"binary".
         "matting_export": "auto",
+        # green / blue: chroma-key MP4; transparent: RGBA PNG sequence folder.
+        "export_background": "green",
+        # Empty = same file as sam.vitmatte_sam_onnx_path.
+        "vitmatte_sam_onnx_path": "",
+        # HQ-SAM2 Track math: auto = FP16 only if this GPU runs FP16 clearly
+        # faster than FP32 (RTX yes; GTX 16xx/10xx no). fp16 / fp32 force it.
+        "track_precision": "auto",
+        # Track: each frame looks back at all user keyframes (0, HQ-SAM2's
+        # default) or only at the N closest in time (2/4/8): faster with many
+        # keyframes. Settings shows it; the Track report compares the masks.
+        "track_keyframes_in_memory": 0,
+        # A frame repeating the earlier picture around the object (anime holds
+        # a drawing 2-3 frames) reuses its mask after Track and its alpha at
+        # Export, so held hair does not flicker (engine/video_holds.py).
+        "reuse_held_frames": True,
     },
     "batch": {
         "max_batch_images": 30,
+        # Empty = same files as model.* (single image).
+        "unet_onnx_path": "",
+        "vitmatte_unet_onnx_path": "",
     },
     "compute": {"mode": "cpu", "gpu_id": None, "gpu_name": None, "cpu_threads": 2},
+    "model_settings": {"image_vit_enabled": True,
+                       "image_sam_vit_enabled": True, "video_backend": "hqsam2"},
 }
 
 # Keys from older releases. A stale key is rejected with its new name rather
@@ -85,7 +108,6 @@ LEGACY_KEYS = {
     ("sam", "hq3_unload_f3_m7_during_guided"): "sam.unload_auto_models_during_guided",
     ("sam", "m71_shrink_gpu_arena_after_run"): "sam.shrink_gpu_arena_after_run",
     ("sam", "hq3_onnx_timing"): "sam.log_timing",
-    ("sam", "cpu_grabcut_matting"): "sam.cpu_matting_model",
     ("sam", "backend"): None,
     ("sam", "model_type"): None,
     ("sam", "device"): None,
@@ -101,10 +123,20 @@ LEGACY_KEYS = {
 }
 
 ALLOWED_VALUES = {
-    ("sam", "cpu_guided_backend"): ("grabcut", "hqsam"),
     ("sam", "cpu_matting_model"): ("off", "vitmatte_unet", "vitmatte_sam"),
     ("video", "matting_export"): ("auto", "vitmatte_sam", "binary"),
+    ("video", "export_background"): ("green", "blue", "transparent"),
+    ("video", "track_precision"): ("auto", "fp16", "fp32"),
+    ("video", "track_keyframes_in_memory"): (0, 2, 4, 8),
+    ("model_settings", "video_backend"): ("hqsam2",),
 }
+BOOL_KEYS = (
+    ("model_settings", "image_vit_enabled"),
+    ("model_settings", "batch_vit_enabled"),
+    ("model_settings", "image_sam_vit_enabled"),
+    ("output", "foreground_estimation"),
+    ("video", "reuse_held_frames"),
+)
 
 
 # Source mode: config next to app_config.py; EXE mode: next to the EXE.
@@ -177,8 +209,13 @@ def validate_config(config: dict, source: Path) -> None:
                             else f"{group}.{key} → không còn dùng, hãy xóa")
     for (group, key), allowed in ALLOWED_VALUES.items():
         value = (config.get(group) or {}).get(key)
-        if value is not None and value not in allowed:
-            problems.append(f"{group}.{key}={value!r} → chỉ nhận {', '.join(allowed)}")
+        # Same type too: JSON false must not pass as the number 0.
+        if value is not None and not any(type(value) is type(a) and value == a for a in allowed):
+            problems.append(f"{group}.{key}={value!r} → chỉ nhận {', '.join(map(str, allowed))}")
+    for group, flag in BOOL_KEYS:
+        value = (config.get(group) or {}).get(flag)
+        if value is not None and not isinstance(value, bool):
+            problems.append(f'{group}.{flag} phải là true/false')
     if problems:
         raise ValueError(f"Cấu hình {source} cần cập nhật:\n- " + "\n- ".join(problems))
 
@@ -210,14 +247,6 @@ def resolve_app_path(path_value: str) -> Path:
 
 APP_CONFIG = load_app_config()
 
-UNET_ONNX_PATH = str(resolve_app_path(APP_CONFIG["model"]["unet_onnx_path"]))
-VITMATTE_UNET_ONNX_PATH = str(resolve_app_path(APP_CONFIG["model"]["vitmatte_unet_onnx_path"]))
-
-HQSAM_ENCODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hqsam_encoder_onnx_path"]))
-HQSAM_DECODER_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hqsam_decoder_onnx_path"]))
-VITMATTE_SAM_ONNX_PATH = str(resolve_app_path(APP_CONFIG["sam"]["vitmatte_sam_onnx_path"]))
-HQSAM_BASE_CHECKPOINT_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hqsam_base_checkpoint_path"]))
-HQSAM_DECODER_CHECKPOINT_PATH = str(resolve_app_path(APP_CONFIG["sam"]["hqsam_decoder_checkpoint_path"]))
 GUIDED_EDIT_TIMEOUT_MS = int(APP_CONFIG["sam"]["guided_timeout_ms"])
 
 MAX_BATCH_IMAGES = int(APP_CONFIG["batch"]["max_batch_images"])
@@ -228,19 +257,6 @@ BATCH_OUTPUT_DIR = str(resolve_app_path(APP_CONFIG["output"]["batch_output_dir"]
 # Release builds set output.show_debug_button=false and save_debug_outputs=false.
 SAVE_DEBUG_OUTPUTS = bool(APP_CONFIG["output"]["save_debug_outputs"])
 SHOW_DEBUG_BUTTON = bool(APP_CONFIG["output"]["show_debug_button"])
-
-
-def hqsam_manifest_path() -> Path:
-    """The exporter writes '<encoder stem>.manifest.json' next to the encoder."""
-    return Path(HQSAM_ENCODER_ONNX_PATH).with_suffix(".manifest.json")
-
-
-def guided_model_assets() -> tuple[tuple[str, str], ...]:
-    """Files required by HQ-SAM Guided Edit, shared by engine and GPU check."""
-    return (("HQ-SAM encoder ONNX", HQSAM_ENCODER_ONNX_PATH),
-            ("HQ-SAM decoder ONNX", HQSAM_DECODER_ONNX_PATH),
-            ("HQ-SAM export manifest", str(hqsam_manifest_path())),
-            ("ViTMatte-SAM ONNX", VITMATTE_SAM_ONNX_PATH))
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}

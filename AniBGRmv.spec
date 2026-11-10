@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """AniBgRmv release build (PyInstaller onedir).
 
-ANIBGRMV_BUILD_VARIANT=cpu : CPU edition — UNet + ViTMatte-UNet, Guided = GrabCut.
+ANIBGRMV_BUILD_VARIANT=cpu : CPU edition — UNet + ViTMatte-UNet + HQ-SAM ONNX.
 ANIBGRMV_BUILD_VARIANT=gpu : NVIDIA edition — adds HQ-SAM + ViTMatte-SAM ONNX
                              and a verified CUDA/cuDNN runtime. No PyTorch inside;
                              video Track uses an external Python (see README).
@@ -18,6 +18,8 @@ ROOT = Path(globals().get("SPECPATH") or Path.cwd()).resolve()
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'tools'))
 from ani_bgrmv.hqsam_manifest import check_hqsam_manifest, manifest_path_for
+from ani_bgrmv.model_registry import MODELS, model_value
+from ani_bgrmv.release_models import MODEL_LIST, write_model_list
 
 SOURCE_CONFIG = ROOT / 'ani_bgrmv' / 'app_config.json'
 if not SOURCE_CONFIG.is_file():
@@ -32,7 +34,7 @@ EXE_NAME = 'AniBGRmv_CPU' if VARIANT == 'cpu' else 'AniBGRmv'
 # on their PC (stored in LOCALAPPDATA) and starts in CPU mode.
 seed = json.loads(json.dumps(config))
 seed['compute'] = {'mode': 'cpu', 'gpu_id': None, 'gpu_name': None, 'cpu_threads': 2}
-seed.setdefault('sam', {})['cpu_guided_backend'] = 'grabcut'
+seed.setdefault('sam', {}).pop('cpu_guided_backend', None)
 seed.setdefault('output', {}).update({
     'single_output_dir': 'output/single_saved',
     'batch_output_dir': 'output/batch_saved',
@@ -49,41 +51,40 @@ SAFE_CONFIG.write_text(json.dumps(seed, ensure_ascii=False, indent=2) + '\n', en
 FLAVOR_FILE = META_DIR / 'build_flavor.json'
 FLAVOR_FILE.write_text(json.dumps({'variant': VARIANT}), encoding='utf-8')
 
-MODEL_KEYS = [('model', 'unet_onnx_path'), ('model', 'vitmatte_unet_onnx_path')]
-if VARIANT == 'gpu':
-    MODEL_KEYS += [('sam', 'hqsam_encoder_onnx_path'), ('sam', 'hqsam_decoder_onnx_path'),
-                   ('sam', 'vitmatte_sam_onnx_path')]
+# Every ONNX role of model_registry, including separate Batch/Video choices.
 selected = {}
-for group, key in MODEL_KEYS:
-    raw = config.get(group, {}).get(key)
-    if not isinstance(raw, str) or not raw:
-        raise RuntimeError(f'Missing {group}.{key} in {SOURCE_CONFIG}')
+for role, spec in MODELS.items():
+    if not spec.bundled:
+        continue  # PyTorch checkpoints stay outside the EXE (video worker)
+    raw = model_value(role, config)
+    if not raw:
+        raise RuntimeError(f'Missing {spec.group}.{spec.key} in {SOURCE_CONFIG}')
     rel = Path(raw)
     if rel.is_absolute() or rel.drive or '..' in rel.parts or rel.suffix.lower() != '.onnx':
-        raise RuntimeError(f'{group}.{key} must be a safe relative .onnx path: {raw}')
+        raise RuntimeError(f'{spec.group}.{spec.key} must be a safe relative .onnx path: {raw}')
     src = next((p for p in (ROOT / 'ani_bgrmv' / rel, ROOT / rel) if p.is_file()), None)
     if src is None:
-        raise RuntimeError(f'Model missing ({group}.{key}): {raw}')
+        raise RuntimeError(f'Model missing ({spec.group}.{spec.key}): {raw}')
     selected[rel.as_posix()] = src
 
 model_assets = dict(selected)
-if VARIANT == 'gpu':
-    encoder_rel = Path(config['sam']['hqsam_encoder_onnx_path'])
-    decoder_rel = Path(config['sam']['hqsam_decoder_onnx_path'])
-    if encoder_rel.parent != decoder_rel.parent:
-        raise RuntimeError('HQ-SAM encoder/decoder must share a model directory')
-    encoder_src, decoder_src = selected[encoder_rel.as_posix()], selected[decoder_rel.as_posix()]
-    try:
-        manifest = check_hqsam_manifest(encoder_src, decoder_src)
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-    manifest_src = manifest_path_for(encoder_src)
-    model_assets[str(encoder_rel.with_name(manifest_src.name))] = manifest_src
-    # The exporter lists every external tensor file of both graphs.
-    for filename in manifest.get('sidecars', {}):
-        if not filename.startswith((encoder_src.name + '.', decoder_src.name + '.')):
-            raise RuntimeError(f'HQ-SAM manifest sidecar does not belong to its graphs: {filename!r}')
-        model_assets[str(encoder_rel.with_name(filename))] = manifest_src.parent / filename
+# Validate and bundle guided ONNX on both build flavors.
+encoder_rel = Path(model_value('hqsam_encoder', config))
+decoder_rel = Path(model_value('hqsam_decoder', config))
+if encoder_rel.parent != decoder_rel.parent:
+    raise RuntimeError('HQ-SAM encoder/decoder must share a model directory')
+encoder_src, decoder_src = selected[encoder_rel.as_posix()], selected[decoder_rel.as_posix()]
+try:
+    manifest = check_hqsam_manifest(encoder_src, decoder_src)
+except ValueError as exc:
+    raise RuntimeError(str(exc)) from exc
+manifest_src = manifest_path_for(encoder_src)
+model_assets[str(encoder_rel.with_name(manifest_src.name))] = manifest_src
+# The exporter lists every external tensor file of both graphs.
+for filename in manifest.get('sidecars', {}):
+    if not filename.startswith((encoder_src.name + '.', decoder_src.name + '.')):
+        raise RuntimeError(f'HQ-SAM manifest sidecar does not belong to its graphs: {filename!r}')
+    model_assets[str(encoder_rel.with_name(filename))] = manifest_src.parent / filename
 
 for relative, src in sorted(selected.items()):
     # Exports of UNet/ViTMatte may produce one '<model>.onnx.data' sidecar.
@@ -91,15 +92,21 @@ for relative, src in sorted(selected.items()):
     if external.is_file():
         model_assets[str(Path(relative).with_name(external.name))] = external
 
+VIDEO_SIDECAR_FILES = ('video_track_worker.py', 'video_matting_worker.py',
+                       'video_diagnostics.py', 'matting_ops.py')
+
+# The packaged app checks these files on start; package_release.py puts them
+# in the separate Models archive of the GPU release.
+MODEL_LIST_FILE = write_model_list(META_DIR / MODEL_LIST, model_assets)
+
 # Bundle the canonical seed config, not the developer's app_config.json.
-datas = [(str(SAFE_CONFIG), '.'), (str(FLAVOR_FILE), '.')]
+datas = [(str(SAFE_CONFIG), '.'), (str(FLAVOR_FILE), '.'), (str(MODEL_LIST_FILE), '.')]
 for relative, src in sorted(model_assets.items()):
     datas.append((str(src), str(Path(relative).parent)))
-if VARIANT == 'gpu':
-    # Video sidecars run in the user-configured external PyTorch Python, so
-    # they ship as plain .py data files (not frozen bytecode).
-    for name in ('video_track_worker.py', 'video_matting_worker.py', 'video_diagnostics.py'):
-        datas.append((str(ROOT / 'ani_bgrmv' / 'engine' / name), 'ani_bgrmv/engine'))
+# Video sidecars run as plain .py files in the external PyTorch environment;
+# matting_ops.py is the shared preprocessing imported by the matting sidecar.
+for name in VIDEO_SIDECAR_FILES:
+    datas.append((str(ROOT / 'ani_bgrmv' / 'engine' / name), 'ani_bgrmv/engine'))
 
 from cuda_bundle_smoke import verified_selection
 from cuda_bundle_optimizer import prune_automatic_cuda_copies
@@ -144,10 +151,10 @@ analysis = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=([str(ROOT / 'tools' / 'pyi_rth_cuda_bundle.py')] if VARIANT == 'gpu' else []),
-    # The app runs every model on ONNX Runtime: no training/export stack.
+    # The app runs every model on ONNX Runtime: no training/export/test stack.
     excludes=['torch', 'torchvision', 'torchaudio', 'sam2', 'segment_anything', 'onnx',
               'segmentation_models_pytorch', 'timm', 'albumentations', 'transformers',
-              'pandas', 'matplotlib', 'scipy', 'sympy'],
+              'pandas', 'matplotlib', 'scipy', 'sympy', 'pytest', '_pytest'],
     noarchive=False,
 )
 if VARIANT == 'gpu':

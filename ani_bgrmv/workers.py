@@ -1,12 +1,16 @@
+from __future__ import annotations
+
 from pathlib import Path
 import csv
 import shutil
 import traceback
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-from bg_engine import BgRemoveEngine
+if TYPE_CHECKING:  # annotations only: importing the engine loads ONNX Runtime
+    from .engine.bg_remove_engine import BgRemoveEngine
 
 class SingleCutWorker(QObject):
     finished = Signal(dict)
@@ -93,6 +97,9 @@ class GuidedEditWorker(QObject):
 
             self.progress.emit(100, "Đã hoàn tất")
             self.finished.emit(result)
+        except ValueError as exc:
+            # Invalid user prompts should be explained, not show a traceback.
+            self.error.emit(str(exc))
         except Exception:
             self.error.emit(traceback.format_exc())
 
@@ -142,13 +149,15 @@ class BatchCutWorker(QObject):
     canceled = Signal()
     error = Signal(str)
 
-    def __init__(self, engine: BgRemoveEngine, image_paths: list[str], lightweight: bool = False,
-                 batch_cache_dir: str | None = None):
+    def __init__(self, engine: BgRemoveEngine, image_paths: list[str], cache_dir: str,
+                 keep_debug: bool = False):
+        """Every result is staged in ``cache_dir`` right after its cut, so RAM
+        holds only small dicts (see SavePredictionMixin.stage_prediction)."""
         super().__init__()
         self.engine = engine
         self.image_paths = image_paths
-        self.lightweight = bool(lightweight)
-        self.batch_cache_dir = Path(batch_cache_dir) if batch_cache_dir else None
+        self.cache_dir = Path(cache_dir)
+        self.keep_debug = bool(keep_debug)
         self.cancel_requested = False
 
     def cancel(self):
@@ -165,25 +174,15 @@ class BatchCutWorker(QObject):
                     return
 
                 self.progress.emit(idx - 1, total, f"Đang cắt: {Path(path).name}")
-                result = self.engine.process_for_preview(path, include_debug=not self.lightweight)
+                result = self.engine.process_for_preview(path, include_debug=self.keep_debug,
+                                                         profile='batch')
 
                 if self.cancel_requested:
                     self.canceled.emit()
                     return
 
-                if self.batch_cache_dir is not None:
-                    # Release mode: keep N full-resolution cutouts on disk,
-                    # not in the Qt signal/result list.
-                    self.batch_cache_dir.mkdir(parents=True, exist_ok=True)
-                    cached_path = self.batch_cache_dir / f'{idx:04d}_cutout.png'
-                    compact_cutout = self.engine.optimize_cutout_png(result['cutout_pil'])
-                    compact_cutout.save(cached_path, 'PNG', compress_level=1)
-                    result = {
-                        'input_path': result['input_path'],
-                        'cached_cutout_path': str(cached_path),
-                        'elapsed_sec': result.get('elapsed_sec'),
-                    }
-                results.append(result)
+                results.append(self.engine.stage_prediction(result, self.cache_dir, idx,
+                                                            self.keep_debug))
                 self.progress.emit(idx, total, f"Đã cắt: {Path(path).name}")
 
             self.finished.emit(results)
@@ -191,9 +190,28 @@ class BatchCutWorker(QObject):
             self.error.emit(traceback.format_exc())
 
 
+def save_staged(engine: BgRemoveEngine, staged: dict, output_dir: str, save_debug: bool) -> dict:
+    """Save one staged batch image (stage_prediction) into ``output_dir``.
+
+    Debug: cutout + previews + 99_debug from the staged .npz. Otherwise the
+    staged PNG is copied as is: lossless RGBA, no recompression.
+    """
+    if save_debug:
+        if 'cached_debug_path' not in staged:
+            raise RuntimeError('Debug ON cần dữ liệu gốc; hãy cắt lại với Debug ON.')
+        return engine.save_prediction(engine.load_staged_prediction(staged), output_dir, save_debug=True)
+    dst = engine._unique_path(Path(output_dir) / '01_cutouts', f"{Path(staged['input_path']).stem}_cutout.png")
+    shutil.copyfile(staged['cached_cutout_path'], dst)
+    return {'input_path': staged['input_path'], 'cutout_path': str(dst),
+            'elapsed_sec': staged.get('elapsed_sec')}
+
+
 class BatchSaveWorker(QObject):
+    """Saves the staged images in order; Stop takes effect after the image
+    being saved. ``canceled(n)``: the first n images were saved."""
     progress = Signal(int, int, str)
     finished = Signal(str)
+    canceled = Signal(int)
     error = Signal(str)
 
     def __init__(
@@ -208,6 +226,10 @@ class BatchSaveWorker(QObject):
         self.predictions = predictions
         self.output_dir = output_dir
         self.save_debug = save_debug
+        self.cancel_requested = False
+
+    def cancel(self):
+        self.cancel_requested = True
 
     def run(self):
         try:
@@ -215,43 +237,34 @@ class BatchSaveWorker(QObject):
             total = len(self.predictions)
 
             for idx, pred in enumerate(self.predictions, start=1):
-                self.progress.emit(idx - 1, total, f"Đang lưu: {Path(pred['input_path']).name}")
-                if 'cached_cutout_path' in pred:
+                if self.cancel_requested:
                     if self.save_debug:
-                        raise RuntimeError('Debug ON cần dữ liệu gốc; hãy cắt lại với Debug ON.')
-                    src = Path(pred['cached_cutout_path'])
-                    dst = self.engine._unique_path(Path(self.output_dir) / '01_cutouts',
-                                                    f"{Path(pred['input_path']).stem}_cutout.png")
-                    shutil.copyfile(src, dst)  # lossless RGBA, no recompression
-                    saved = {'input_path': pred['input_path'], 'cutout_path': str(dst),
-                             'elapsed_sec': pred.get('elapsed_sec')}
-                else:
-                    saved = self.engine.save_prediction(
-                        pred, self.output_dir, save_debug=self.save_debug,
-                    )
-                logs.append(saved)
+                        self._write_log(logs)
+                    self.canceled.emit(len(logs))
+                    return
+                self.progress.emit(idx - 1, total, f"Đang lưu: {Path(pred['input_path']).name}")
+                logs.append(save_staged(self.engine, pred, self.output_dir, self.save_debug))
                 self.progress.emit(idx, total, f"Đã lưu: {Path(pred['input_path']).name}")
 
             if self.save_debug:
                 # Keep the original batch report when debugging.
-                out_dir = Path(self.output_dir)
-                out_dir.mkdir(parents=True, exist_ok=True)
-                log_path = out_dir / "batch_log.csv"
-                # stdlib csv (no pandas); columns in first-seen order, including
-                # fields that appear only in later saved predictions.
-                columns = list(dict.fromkeys(key for item in logs for key in item))
-                with log_path.open('w', newline='', encoding='utf-8-sig') as stream:
-                    if columns:
-                        writer = csv.DictWriter(stream, fieldnames=columns,
-                                                extrasaction='ignore')
-                        writer.writeheader()
-                        writer.writerows(logs)
-                self.finished.emit(str(log_path))
+                self.finished.emit(self._write_log(logs))
             else:
                 # Release-like save: PNG cutouts only; no batch_log.csv.
                 self.finished.emit(str(Path(self.output_dir) / "01_cutouts"))
         except Exception:
             self.error.emit(traceback.format_exc())
 
-
-
+    def _write_log(self, logs: list[dict]) -> str:
+        out_dir = Path(self.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log_path = out_dir / "batch_log.csv"
+        # stdlib csv (no pandas); columns in first-seen order, including
+        # fields that appear only in later saved predictions.
+        columns = list(dict.fromkeys(key for item in logs for key in item))
+        with log_path.open('w', newline='', encoding='utf-8-sig') as stream:
+            if columns:
+                writer = csv.DictWriter(stream, fieldnames=columns, extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(logs)
+        return str(log_path)

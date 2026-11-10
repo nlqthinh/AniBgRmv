@@ -10,6 +10,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from . import matting_ops as ops
+
 
 MAX_INSTANCE_SIDE = 1536
 MAX_AREA_BRUSH_FACTOR = 500
@@ -126,6 +128,6 @@ def instance_support_box(mask: np.ndarray, brush_size: int) -> tuple[int, int, i
         raise ValueError("Không thể tạo ROI từ mask HQ-SAM rỗng.")
     # The matting trimap's maximum 33px dilation at 768 has radius 16; add headroom for
     # upscaling/downscaling when restoring its support to source resolution.
-    pad = max(48, brush_size * 2, int(np.ceil(20 * max(h, w) / 768)))
+    pad = max(48, brush_size * 2, int(np.ceil(20 * max(h, w) / ops.LETTERBOX_SIZE)))
     return (max(0, int(xs.min()) - pad), max(0, int(ys.min()) - pad),
             min(w, int(xs.max()) + 1 + pad), min(h, int(ys.max()) + 1 + pad))

@@ -24,7 +24,7 @@ class HomePage(QWidget):
         self.btn_batch = QPushButton("Cắt nhiều hình")
         self.btn_video = QPushButton("Cắt video")
         self.btn_object = QPushButton("Xóa vật thể (sau)")
-        self.btn_compute = QPushButton("Trạng thái CPU/GPU")
+        self.btn_compute = QPushButton("Setting")
 
         for btn in [self.btn_single, self.btn_batch, self.btn_video, self.btn_object, self.btn_compute]:
             btn.setMinimumWidth(260)

@@ -20,6 +20,7 @@ def _test_impl() -> dict:
     preload_runtime()
     import numpy as np
     import onnxruntime as ort
+    from .engine import matting_ops as ops
     from .gpu_memory_options import cuda_provider_options
 
     root = Path(getattr(sys, '_MEIPASS', Path(sys.executable).resolve().parent))
@@ -44,8 +45,9 @@ def _test_impl() -> dict:
     input_name = sess.get_inputs()[0].name
     # Same shape as the app's UNet letterbox image. Two values exercise both
     # first-run cuDNN graph build and subsequent execution, with real data.
-    samples = [np.zeros((1,3,768,768), np.float32),
-               np.random.default_rng(20261031).uniform(0.0, 1.0, (1,3,768,768)).astype(np.float32)]
+    shape = ops.model_input_shape(ops.UNET_CHANNELS)
+    samples = [np.zeros(shape, np.float32),
+               np.random.default_rng(20261031).uniform(0.0, 1.0, shape).astype(np.float32)]
     outputs = []
     for x in samples:
         y = sess.run(None, {input_name:x})

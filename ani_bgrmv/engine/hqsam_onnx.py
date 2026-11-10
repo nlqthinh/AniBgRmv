@@ -12,18 +12,16 @@ CPU PC only runs HqSamDecoder (instance annotation, see ani_bgrmv/annotation).
 """
 from __future__ import annotations
 
-import json
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
 from PIL import Image
 
 from ..hqsam_manifest import check_hqsam_manifest
-from .onnx_cuda_audit import HQSAM_DECODER_PART, audit_cuda_profile
+from .onnx_cuda_audit import HQSAM_DECODER_PART
+from .onnx_device import OnnxDevice
 
 SAM_SIZE = 1024
 _MEAN = np.array([0.485, 0.456, 0.406], np.float32).reshape(1, 1, 3)
@@ -94,77 +92,6 @@ class HqSamFeatures:
         if not all(np.isfinite(m).all() for m in maps):
             raise ValueError(f'File features HQ-SAM có giá trị không hợp lệ (NaN/Inf): {path}')
         return cls(maps, original_hw)
-
-
-class OnnxDevice:
-    """The app's strict ONNX Runtime policy for one device: 'cpu' or 'cuda:N'.
-
-    GPU never falls back to CPU, and the first run of each graph is profiled to
-    prove its layers executed on CUDA.
-    """
-
-    def __init__(self, device: str, *, cpu_threads: int = 2, shrink_gpu_arena: bool = True,
-                 log_timing: bool = False, cuda_options: dict | None = None):
-        self.device = device
-        self.uses_gpu = device.startswith('cuda:')
-        if self.uses_gpu:
-            if 'CUDAExecutionProvider' not in ort.get_available_providers():
-                raise RuntimeError('HQ-SAM ONNX cần CUDAExecutionProvider; không fallback CPU.')
-            self._providers = [('CUDAExecutionProvider', dict(cuda_options or {}))]
-        elif device == 'cpu':
-            self._providers = ['CPUExecutionProvider']
-        else:
-            raise ValueError(f'Thiết bị HQ-SAM không hợp lệ: {device}')
-        self._cpu_threads = max(1, min(4, int(cpu_threads)))
-        self._shrink_gpu_arena = bool(shrink_gpu_arena)
-        self._log_timing = bool(log_timing)
-        self._audited: set[str] = set()
-
-    def session(self, path: Path, part: str, inputs, outputs):
-        opts = ort.SessionOptions()
-        opts.enable_cpu_mem_arena = False
-        opts.enable_mem_pattern = False
-        # Keep the ORT threadpool small so the GUI thread stays responsive.
-        opts.intra_op_num_threads = self._cpu_threads
-        opts.inter_op_num_threads = 1
-        if self.uses_gpu and part not in self._audited:
-            opts.enable_profiling = True  # first run only; see _audit_first_run
-        session = ort.InferenceSession(str(path), sess_options=opts, providers=self._providers)
-        if self.uses_gpu:
-            if session.get_providers()[0] != 'CUDAExecutionProvider':
-                raise RuntimeError(f'{part} không được nạp trên CUDA.')
-            session.disable_fallback()
-        ins = {x.name for x in session.get_inputs()}
-        outs = {x.name for x in session.get_outputs()}
-        if not set(inputs).issubset(ins) or not set(outputs).issubset(outs):
-            raise RuntimeError(f'{part} ONNX sai graph: inputs={ins}; outputs={outs}.')
-        return session
-
-    def _audit_first_run(self, session, part: str) -> None:
-        """Strict GPU: prove the first run executed its layers on CUDA."""
-        if not self.uses_gpu or part in self._audited:
-            return
-        path = Path(session.end_profiling())
-        try:
-            audit_cuda_profile(json.loads(path.read_text(encoding='utf-8')), part)
-        finally:
-            path.unlink(missing_ok=True)
-        self._audited.add(part)
-
-    def run(self, session, part: str, outputs, feed):
-        started = time.perf_counter()
-        options = None
-        if self.uses_gpu and self._shrink_gpu_arena:
-            # Return idle CUDA arena memory after Run (4 GB GPUs); weights stay.
-            options = ort.RunOptions()
-            options.add_run_config_entry('memory.enable_memory_arena_shrinkage',
-                                         'gpu:' + self.device.split(':', 1)[1])
-        result = session.run(list(outputs), feed, options)
-        self._audit_first_run(session, part)
-        if self._log_timing:
-            print(f'[AniBgRmv HQ-SAM] {part}_ms={(time.perf_counter() - started) * 1000:.1f}',
-                  flush=True)
-        return result
 
 
 class HqSamDecoder:

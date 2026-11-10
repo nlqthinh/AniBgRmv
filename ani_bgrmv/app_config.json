@@ -13,7 +13,6 @@
     "guided_timeout_ms": 0,
     "refine_each_stroke": true,
     "small_object_crop": true,
-    "cpu_guided_backend": "grabcut",
     "cpu_matting_model": "vitmatte_unet"
   },
   "output": {
@@ -22,11 +21,26 @@
     "save_debug_outputs": true
   },
   "batch": {
-    "max_batch_images": 30
+    "max_batch_images": 30,
+    "unet_onnx_path": "models/F3_A1_letterbox_constant_768_best.onnx",
+    "vitmatte_unet_onnx_path": "models/m7_vitmatte_letterbox_best.onnx"
   },
   "compute": {
     "mode": "gpu",
     "gpu_id": "cuda:0",
     "gpu_name": "NVIDIA GeForce GTX 1650"
+  },
+  "model_settings": {
+    "image_vit_enabled": true,
+    "image_sam_vit_enabled": true,
+    "video_backend": "hqsam2",
+    "batch_vit_enabled": true
+  },
+  "video": {
+    "matting_export": "vitmatte_sam",
+    "vitmatte_sam_onnx_path": "models/m71_hq3_d0d_best.onnx",
+    "export_background": "blue",
+    "track_keyframes_in_memory": 4,
+    "reuse_held_frames": true
   }
 }

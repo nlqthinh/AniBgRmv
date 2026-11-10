@@ -1,8 +1,20 @@
-"""Stateless image math shared by the automatic cut and Guided Edit.
+"""Stateless image math shared by the automatic cut, Guided Edit and video export.
 
-Matches the training notebooks: aspect-preserving letterbox to 768x768 with
-RGB padding 114 (alpha padding 0), ImageNet normalization, and the loose
-trimap that turns a UNet/HQ-SAM mask into ViTMatte input.
+Every constant here copies a training notebook. Change it only together with
+the notebook that trained the model, otherwise the model sees inputs it was
+never trained on:
+
+  letterbox   768x768, aspect ratio kept, RGB padding 114, alpha padding 0 (F3, M7, M71)
+              downscale filter: INTER_AREA (F3, M7), INTER_LINEAR (M71)
+  UNet        RGB normalized with the ImageNet mean/std (F3)
+  ViTMatte    RGB normalized with mean = std = 0.5, the VitMatteImageProcessor
+              config of hustvl/vitmatte-small-distinctions-646; trimap/255 is
+              the 4th channel (M7, M71)
+  trimaps     loose trimap from the UNet alpha (M7); ellipse erode 17 /
+              dilate 33 around a binary HQ-SAM mask (M71)
+
+This module only needs numpy, OpenCV and Pillow: the video matting sidecar
+imports it as a plain sibling file.
 """
 from __future__ import annotations
 
@@ -11,22 +23,43 @@ import numpy as np
 from PIL import Image
 
 LETTERBOX_SIZE = 768
+# ONNX contract of the letterbox models (F3, M7, M71): one float32 input,
+# RGB (UNet) or RGB + trimap (ViTMatte), and one float32 alpha output.
+UNET_CHANNELS, MATTING_CHANNELS = 3, 4
+ALPHA_OUTPUT_SHAPE = (1, 1, LETTERBOX_SIZE, LETTERBOX_SIZE)
+
+
+def model_input_shape(channels: int) -> tuple[int, int, int, int]:
+    return (1, channels, LETTERBOX_SIZE, LETTERBOX_SIZE)
 PAD_RGB = 114
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+VITMATTE_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+VITMATTE_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+# M71 notebook: cv2.resize(..., INTER_LINEAR) for every letterbox.
+SAM_MATTING_INTERPOLATION = cv2.INTER_LINEAR
+SAM_TRIMAP_KERNELS = (17, 33)  # (erode, dilate) ellipse diameters, M71 notebook
 
 
-def letterbox_rgb(image_pil: Image.Image, size: int = LETTERBOX_SIZE):
+def load_rgb(image_path) -> Image.Image:
+    """Decode an image file to RGB once; every later step reuses this image."""
+    with Image.open(image_path) as source:
+        return source.convert("RGB")
+
+
+def letterbox_rgb(image_pil: Image.Image, size: int = LETTERBOX_SIZE, interpolation: int | None = None):
     """RGB -> keep aspect ratio -> constant gray padding -> size x size.
 
-    Returns (letterboxed PIL image, valid_mask uint8 255/0, meta).
+    ``interpolation=None`` is the F3/M7 rule: INTER_AREA when shrinking,
+    INTER_LINEAR when enlarging. Returns (PIL image, valid_mask 255/0, meta).
     """
     image_np = np.array(image_pil.convert("RGB"))
     orig_h, orig_w = image_np.shape[:2]
     scale = min(size / orig_w, size / orig_h)
     resized_w = int(round(orig_w * scale))
     resized_h = int(round(orig_h * scale))
-    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    if interpolation is None:
+        interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
     resized = cv2.resize(image_np, (resized_w, resized_h), interpolation=interpolation)
 
     pad_left = (size - resized_w) // 2
@@ -47,46 +80,91 @@ def letterbox_rgb(image_pil: Image.Image, size: int = LETTERBOX_SIZE):
     return Image.fromarray(padded.astype(np.uint8)), valid_mask, meta
 
 
-def restore_from_letterbox(alpha_square: np.ndarray, meta: dict) -> np.ndarray:
-    """Crop the padding away and resize to the original image size (uint8)."""
+def to_letterbox(plane: np.ndarray, meta: dict, interpolation: int) -> np.ndarray:
+    """2-D uint8 array in original pixels -> uint8 square laid out like ``meta``, padding 0.
+
+    Binary masks use INTER_NEAREST (as the notebooks), 8-bit alphas INTER_LINEAR.
+    """
+    size = int(meta["target_size"])
+    rw, rh = int(meta["resized_width"]), int(meta["resized_height"])
+    x, y = int(meta["pad_left"]), int(meta["pad_top"])
+    square = np.zeros((size, size), np.uint8)
+    square[y:y + rh, x:x + rw] = cv2.resize(np.asarray(plane, np.uint8), (rw, rh),
+                                            interpolation=interpolation)
+    return square
+
+
+def unletterbox(alpha_square: np.ndarray, meta: dict) -> np.ndarray:
+    """Crop the padding away and resize to the original image size (float32 0..1).
+
+    uint8 input is read as 0..255; float input as 0..1.
+    """
     alpha = np.asarray(alpha_square)
-    if alpha.dtype != np.uint8:
-        alpha = (np.clip(alpha, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+    alpha = alpha.astype(np.float32) / 255.0 if alpha.dtype == np.uint8 else alpha.astype(np.float32)
     x1, y1 = int(meta["pad_left"]), int(meta["pad_top"])
     x2, y2 = x1 + int(meta["resized_width"]), y1 + int(meta["resized_height"])
-    restored = cv2.resize(alpha[y1:y2, x1:x2],
+    restored = cv2.resize(np.clip(alpha[y1:y2, x1:x2], 0.0, 1.0),
                           (int(meta["original_width"]), int(meta["original_height"])),
                           interpolation=cv2.INTER_LINEAR)
-    return restored.astype(np.uint8)
+    return np.clip(restored, 0.0, 1.0)
 
 
-def normalized_chw(image_pil: Image.Image) -> np.ndarray:
-    """RGB -> ImageNet-normalized float32 [3, H, W]."""
+def restore_from_letterbox(alpha_square: np.ndarray, meta: dict) -> np.ndarray:
+    """``unletterbox`` as an 8-bit alpha."""
+    return np.rint(unletterbox(alpha_square, meta) * 255.0).astype(np.uint8)
+
+
+def _normalized_chw(image_pil: Image.Image, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     arr = np.asarray(image_pil.convert("RGB")).astype(np.float32) / 255.0
-    return np.transpose((arr - IMAGENET_MEAN) / IMAGENET_STD, (2, 0, 1))
+    return np.transpose((arr - mean) / std, (2, 0, 1))
 
 
 def unet_input(image_letterbox_pil: Image.Image) -> np.ndarray:
-    return normalized_chw(image_letterbox_pil)[None].astype(np.float32)
+    """UNet image[1,3,768,768], ImageNet-normalized like the F3 notebook."""
+    return _normalized_chw(image_letterbox_pil, IMAGENET_MEAN, IMAGENET_STD)[None].astype(np.float32)
+
+
+def unet_alpha(raw_output: np.ndarray) -> np.ndarray:
+    """Check the UNet ONNX contract: an alpha in 0..1 (sigmoid inside the graph).
+
+    tools/export_unet_onnx.py always exports the sigmoid. A graph that returns
+    logits is rejected instead of guessed at.
+    """
+    alpha = np.asarray(raw_output, dtype=np.float32)
+    if not np.isfinite(alpha).all():
+        raise ValueError("UNet ONNX trả giá trị NaN/Inf.")
+    if alpha.min() < -1e-4 or alpha.max() > 1.0 + 1e-4:
+        raise ValueError(
+            "UNet ONNX phải trả alpha 0..1 (đã có sigmoid), nhưng nhận "
+            f"[{alpha.min():.3f}, {alpha.max():.3f}]. Export lại bằng tools/export_unet_onnx.py.")
+    return np.clip(alpha, 0.0, 1.0)
 
 
 def vitmatte_input(image_letterbox_pil: Image.Image, trimap: np.ndarray,
                    size: int = LETTERBOX_SIZE) -> np.ndarray:
-    """ViTMatte pixel_values: normalized RGB + trimap/255 as a 4th channel."""
+    """ViTMatte pixel_values[1,4,H,W], identical to VitMatteImageProcessor.
+
+    RGB: (x/255 - 0.5) / 0.5. Channel 4: trimap/255 (rescaled, not normalized).
+    """
     image = image_letterbox_pil.convert("RGB")
     if image.size != (size, size):
         image = image.resize((size, size), Image.BILINEAR)
     if trimap.shape != (size, size):
         trimap = cv2.resize(trimap, (size, size), interpolation=cv2.INTER_NEAREST)
-    x = np.concatenate([normalized_chw(image), trimap.astype(np.float32)[None] / 255.0], axis=0)
+    rgb = _normalized_chw(image, VITMATTE_MEAN, VITMATTE_STD)
+    x = np.concatenate([rgb, trimap.astype(np.float32)[None] / 255.0], axis=0)
     return x[None].astype(np.float32)
 
 
 def loose_trimap(alpha_01: np.ndarray, valid_mask: np.ndarray | None = None, *,
                  fg_thresh: float = 0.995, rough_thresh: float = 0.03,
                  erode_k: int = 21, dilate_k: int = 35) -> np.ndarray:
-    """Trimap (0 / 128 / 255) from a coarse alpha; padding forced to background."""
-    alpha = np.clip(alpha_01, 0.0, 1.0).astype(np.float32)
+    """M7 trimap (0 / 128 / 255) from a UNet alpha; padding forced to background.
+
+    The M7 notebook trained and tested ViTMatte on trimaps built from the F3
+    alpha saved as an 8-bit PNG, so the thresholds apply to the 8-bit value.
+    """
+    alpha = np.rint(np.clip(alpha_01, 0.0, 1.0) * 255.0).astype(np.uint8).astype(np.float32) / 255.0
     strong_fg = (alpha >= fg_thresh).astype(np.uint8) * 255
     rough_fg = (alpha >= rough_thresh).astype(np.uint8) * 255
     sure_fg = cv2.erode(strong_fg, np.ones((int(erode_k), int(erode_k)), np.uint8), iterations=1)
@@ -103,6 +181,22 @@ def loose_trimap(alpha_01: np.ndarray, valid_mask: np.ndarray | None = None, *,
     return trimap
 
 
+def mask_trimap(mask_square: np.ndarray, erode_size: int = SAM_TRIMAP_KERNELS[0],
+                dilate_size: int = SAM_TRIMAP_KERNELS[1]) -> np.ndarray:
+    """M71 trimap around a binary mask: dilated band = 128, eroded core = 255.
+
+    Like the notebook, the padding is not forced to 0: a band that reaches
+    the image border may continue into the gray padding.
+    """
+    mask = (np.asarray(mask_square) > 0).astype(np.uint8)
+    erode = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(erode_size), int(erode_size)))
+    dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(dilate_size), int(dilate_size)))
+    trimap = np.zeros(mask.shape, np.uint8)
+    trimap[cv2.dilate(mask, dilate) > 0] = 128
+    trimap[cv2.erode(mask, erode) > 0] = 255
+    return trimap
+
+
 def trimap_ratios(trimap: np.ndarray, valid_mask: np.ndarray | None = None) -> dict:
     """Fraction of background / unknown / foreground (inside valid_mask if given)."""
     arr = np.asarray(trimap)
@@ -114,86 +208,3 @@ def trimap_ratios(trimap: np.ndarray, valid_mask: np.ndarray | None = None) -> d
     return {"bg_ratio": float((arr == 0).sum() / total),
             "unknown_ratio": float((arr == 128).sum() / total),
             "fg_ratio": float((arr == 255).sum() / total)}
-
-
-def array_stats(x: np.ndarray, valid_mask: np.ndarray | None = None) -> dict:
-    values = np.asarray(x, dtype=np.float32)
-    if valid_mask is not None:
-        valid = np.asarray(valid_mask).astype(bool)
-        if valid.shape == values.shape and valid.any():
-            values = values[valid]
-    finite = np.isfinite(values)
-    keys = ("min", "max", "mean", "p01", "p05", "p50", "p95", "p99", "dynamic_p01_p99")
-    if not finite.any():
-        return dict.fromkeys(keys)
-    values = values[finite]
-    p01, p05, p50, p95, p99 = np.percentile(values, [1, 5, 50, 95, 99])
-    return dict(zip(keys, (float(values.min()), float(values.max()), float(values.mean()),
-                           float(p01), float(p05), float(p50), float(p95), float(p99),
-                           float(p99 - p01))))
-
-
-def stretch_if_low_contrast(alpha_01: np.ndarray, valid_mask: np.ndarray | None,
-                            reason_prefix: str) -> tuple[np.ndarray, dict]:
-    """Deployment guard against a 'gray mask' ONNX output.
-
-    A low-contrast alpha makes the loose trimap almost all unknown, and
-    ViTMatte then returns a foggy cutout. Only in that failure mode the alpha
-    is percentile-stretched; normal outputs are returned unchanged.
-    """
-    alpha = np.clip(alpha_01.astype(np.float32), 0.0, 1.0)
-    valid = None
-    if valid_mask is not None:
-        valid = np.asarray(valid_mask).astype(bool)
-        if not (valid.shape == alpha.shape and valid.any()):
-            valid = None
-
-    stats_before = array_stats(alpha, valid)
-    p01, p99, dynamic = stats_before["p01"], stats_before["p99"], stats_before["dynamic_p01_p99"]
-    if p01 is None or p99 is None or dynamic is None or dynamic < 1e-6:
-        return alpha, {"applied": False, "reason": f"{reason_prefix}_not_enough_dynamic_range",
-                       "stats_before": stats_before}
-
-    trimap_before = trimap_ratios(loose_trimap(alpha, valid), valid)
-    low_contrast = (p99 < 0.90) or (p01 > 0.08) or (dynamic < 0.55)
-    trimap_too_open = trimap_before["bg_ratio"] < 0.08 or trimap_before["unknown_ratio"] > 0.70
-    if not (low_contrast or trimap_too_open):
-        return alpha, {"applied": False, "reason": f"{reason_prefix}_already_sane",
-                       "stats_before": stats_before, "trimap_before": trimap_before}
-
-    lo, hi = float(p01), float(p99)
-    stretched = np.clip((alpha - lo) / max(hi - lo, 1e-6), 0.0, 1.0).astype(np.float32)
-    if valid is not None:
-        stretched[~valid] = 0.0
-    # Keep soft edges, but make confident bg/fg actually confident.
-    stretched[stretched < 0.015] = 0.0
-    stretched[stretched > 0.985] = 1.0
-    return stretched, {
-        "applied": True, "reason": f"{reason_prefix}_low_contrast_or_open_trimap",
-        "stats_before": stats_before, "stats_after": array_stats(stretched, valid),
-        "trimap_before": trimap_before,
-        "trimap_after": trimap_ratios(loose_trimap(stretched, valid), valid),
-        "stretch_p01": lo, "stretch_p99": hi,
-    }
-
-
-def unet_alpha_for_trimap(raw_output: np.ndarray, valid_mask: np.ndarray) -> dict:
-    """Turn the UNet ONNX output into the alpha used to build the trimap.
-
-    Exports may return logits (notebook applies sigmoid) or an alpha already
-    in 0..1; never apply sigmoid twice. Then apply the low-contrast guard.
-    """
-    raw = np.nan_to_num(np.asarray(raw_output, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
-    raw_stats = array_stats(raw, valid_mask)
-    looks_like_logits = (raw_stats["min"] is not None and
-                         (raw_stats["min"] < 0.0 or raw_stats["max"] > 1.0))
-    if looks_like_logits:
-        mode, alpha = "sigmoid_from_logits", 1.0 / (1.0 + np.exp(-raw))
-    else:
-        mode, alpha = "direct_alpha", raw
-    before_fix = np.clip(alpha, 0.0, 1.0).astype(np.float32)
-    used, fix_stats = stretch_if_low_contrast(before_fix, valid_mask, mode)
-    trimap = loose_trimap(used, valid_mask)
-    return {"raw_output": raw, "alpha_before_fix": before_fix, "alpha_used": used,
-            "mode": mode, "raw_stats": raw_stats, "fix_stats": fix_stats,
-            "trimap": trimap, "trimap_ratios_valid": trimap_ratios(trimap, valid_mask)}

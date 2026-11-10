@@ -22,12 +22,23 @@ def main() -> int:
         args = sys.argv[1:]
         return annotation_tool(args[args.index('--annotation-tool') + 1:])
 
-    from PySide6.QtWidgets import QApplication
+    # Instance-annotation app for the dataset annotator (separate window).
+    if '--annotator' in sys.argv[1:]:
+        from ani_bgrmv.annotation.annotator_window import main as annotator
+        return annotator()
+
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from ani_bgrmv.app_config import APP_BASE_DIR
     from ani_bgrmv.main_window import MainWindow
+    from ani_bgrmv.release_models import missing_model_files, missing_models_message
     from ani_bgrmv.styles import apply_fixed_dark_theme
 
     app = QApplication(sys.argv)
     apply_fixed_dark_theme(app)
+    missing = missing_model_files(APP_BASE_DIR)
+    if missing:  # e.g. only the App archive of the GPU release was extracted
+        QMessageBox.critical(None, 'Thiếu model', missing_models_message(missing))
+        return 1
     window = MainWindow()
     window.show()
     return app.exec()

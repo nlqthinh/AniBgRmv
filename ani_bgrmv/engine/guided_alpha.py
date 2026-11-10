@@ -8,6 +8,8 @@ stroke on a 4K/8K image does not allocate full-size temporary arrays.
 import cv2
 import numpy as np
 
+from . import matting_ops as ops
+
 # Hard Erase: matting may extend the selected instance by a *small* border,
 # but its soft values must never leave half-erased outlines in final alpha.
 HARD_ERASE_MATTE_THRESHOLD = 0.50
@@ -117,7 +119,7 @@ def hard_erase_mask(selection: np.ndarray, soft_selection: np.ndarray,
 
     height, width = core.shape
     radius = max(1, min(HARD_ERASE_MAX_BORDER_RADIUS, int(round(
-        HARD_ERASE_BORDER_RADIUS_AT_768 * max(height, width) / 768.0))))
+        HARD_ERASE_BORDER_RADIUS_AT_768 * max(height, width) / float(ops.LETTERBOX_SIZE)))))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
     # Never dilate an entire 4K/8K mask for a small stroke: stay inside ROI.
     rows = np.flatnonzero(roi.any(axis=1))

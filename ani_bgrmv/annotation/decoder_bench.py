@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import shutil
 import time
 from pathlib import Path
 
@@ -22,11 +21,13 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
-from ..engine.hqsam_onnx import (HqSamDecoder, HqSamFeatures, HqSamOnnxPredictor, OnnxDevice,
+from ..engine.hqsam_onnx import (HqSamDecoder, HqSamFeatures, HqSamOnnxPredictor,
                                  mask_from_logits)
-from ..hqsam_manifest import check_hqsam_manifest, sha256_file
+from ..engine.onnx_device import OnnxDevice
+from ..hqsam_manifest import sha256_file
 from .alpha_split import AlphaSplit, split_alpha
 from .dataset_index import read_alpha, read_rgb, sample_entries, usable_entries
+from .output_dir import copy_decoder, fresh_output_dir
 
 BENCH_FORMAT = 'anibgrmv-hqsam-decoder-bench-v1'
 BENCH_FILE = 'bench.json'
@@ -63,24 +64,12 @@ def mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.logical_and(a, b).sum() / union) if union else 1.0
 
 
-def _new_pack(pack_dir: Path) -> None:
-    if pack_dir.exists():
-        if not (pack_dir / BENCH_FILE).is_file() and any(pack_dir.iterdir()):
-            raise ValueError(f'Thư mục gói đã có file khác, không ghi đè: {pack_dir}')
-        shutil.rmtree(pack_dir)  # an older bench pack
-    (pack_dir / 'features').mkdir(parents=True)
-    (pack_dir / 'reference').mkdir()
-
-
-def prepare_bench(root: Path, index: dict, pack_dir: Path, *, encoder_path: Path, decoder_path: Path,
-                  device: str, cuda_options: dict | None = None, count: int = 20, keep: int = 10,
+def prepare_bench(root: Path, index: dict, pack_dir: Path, *, predictor: HqSamOnnxPredictor,
+                  reference_decoder: HqSamDecoder, count: int = 20, keep: int = 10,
                   progress=None) -> dict:
     """GPU PC: time the encoder, check FP16, write the pack for the CPU PC."""
-    root, pack_dir, decoder_path = Path(root), Path(pack_dir), Path(decoder_path)
-    manifest = check_hqsam_manifest(encoder_path, decoder_path)
-    predictor = HqSamOnnxPredictor(encoder_path, decoder_path, device, cuda_options=cuda_options)
-    reference_decoder = HqSamDecoder(decoder_path, OnnxDevice('cpu', cpu_threads=BENCH_THREADS))
-    _new_pack(pack_dir)
+    root, pack_dir = Path(root), Path(pack_dir)
+    fresh_output_dir(pack_dir, BENCH_FILE, ('features', 'reference'))
     encode_ms, ious, logit_diffs, samples, nonfinite = [], [], [], [], 0
     entries = sample_entries(index, count)
     for done, entry in enumerate(entries, 1):
@@ -110,11 +99,9 @@ def prepare_bench(root: Path, index: dict, pack_dir: Path, *, encoder_path: Path
             progress(done, len(entries))
     if not samples:
         raise ValueError('Không có ảnh mẫu nào có object để thử decoder.')
-    sidecars = [n for n in (manifest.get('sidecars') or {}) if n.startswith(decoder_path.name + '.')]
-    for name in (decoder_path.name, *sidecars):
-        shutil.copy2(decoder_path.parent / name, pack_dir / name)
-    spec = {'format': BENCH_FORMAT, 'decoder_filename': decoder_path.name,
-            'decoder_sha256': sha256_file(decoder_path), 'cpu_threads': BENCH_THREADS,
+    decoder_sha256 = copy_decoder(predictor.encoder_path, predictor.decoder_path, pack_dir)
+    spec = {'format': BENCH_FORMAT, 'decoder_filename': predictor.decoder_path.name,
+            'decoder_sha256': decoder_sha256, 'cpu_threads': BENCH_THREADS,
             'repeats': REPEATS, 'samples': samples}
     (pack_dir / BENCH_FILE).write_text(json.dumps(spec, ensure_ascii=False, indent=1), encoding='utf-8')
     return {'images': len(encode_ms), 'first_encode_ms': encode_ms[0],

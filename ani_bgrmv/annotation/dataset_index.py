@@ -9,11 +9,12 @@ relative path and name (any image extension).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import random
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 from PIL import Image
@@ -153,6 +154,46 @@ def build_index(root: Path, image_exts, progress=None) -> dict:
             'image_exts': sorted(image_exts), 'layout': describe_layout(root)}
 
 
+def locate_by_content(root: Path, wanted: dict[str, str], image_exts, cache_file: Path) -> dict[str, tuple[str, str]]:
+    """Find images by the SHA-256 of their pixels, whatever their names here.
+
+    ``wanted`` maps sha -> the path the image is expected at; files with that
+    path, then with that file name (any folder or extension), then in that top
+    folder are read first, so usually only the wanted files are read. Returns
+    sha -> (image, cutout) inside ``root``. Hashes are cached in ``cache_file``
+    by (path, size, mtime), so only new or changed files are read again. The
+    cache is written only when something was found (a wrongly chosen folder
+    stays untouched)."""
+    root, cache_file = Path(root), Path(cache_file)
+    cache = json.loads(cache_file.read_text(encoding='utf-8')) if cache_file.is_file() else {}
+    hints = set(wanted.values())
+    stems = {PurePosixPath(path).stem.lower() for path in hints}
+    folders = {top_folder(path) for path in hints}
+
+    def order(pair: Pair):
+        rel = pair.image.relative_to(root).as_posix()
+        return rel not in hints, pair.image.stem.lower() not in stems, top_folder(rel) not in folders, rel
+
+    found: dict[str, tuple[str, str]] = {}
+    pairs = [p for p in find_pairs(root, image_exts)[0] if p.cutout is not None]
+    for pair in sorted(pairs, key=order):
+        if len(found) == len(wanted):
+            break
+        rel, stat = pair.image.relative_to(root).as_posix(), pair.image.stat()
+        record = cache.get(rel)
+        if record is None or record[:2] != [stat.st_size, stat.st_mtime_ns]:
+            try:
+                record = cache[rel] = [stat.st_size, stat.st_mtime_ns, pixel_sha256(read_rgb(pair.image))]
+            except _READ_ERRORS:
+                continue
+        if record[2] in wanted and record[2] not in found:
+            found[record[2]] = (rel, pair.cutout.relative_to(root).as_posix())
+    if found:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(cache), encoding='utf-8')
+    return found
+
+
 def check_index(index: dict, source) -> dict:
     if not isinstance(index, dict) or index.get('format') != INDEX_FORMAT:
         raise ValueError(f'Không phải file index của bước 0: {source}')
@@ -177,7 +218,7 @@ def _by_sha(index: dict) -> dict[str, list[dict]]:
     return groups
 
 
-def _top_folder(rel: str) -> str:
+def top_folder(rel: str) -> str:
     return rel.split('/', 1)[0] if '/' in rel else '.'
 
 
@@ -190,8 +231,8 @@ def compare_indexes(owner: dict, worker: dict) -> dict:
         matched.append({'image_sha256': sha, 'owner_image': a['image'], 'worker_image': b['image'],
                         'cutout_same': bool(a.get('cutout_sha256'))
                         and a.get('cutout_sha256') == b.get('cutout_sha256')})
-    totals = Counter(_top_folder(e['image']) for e in worker['entries'])
-    found = Counter(_top_folder(row['worker_image']) for row in matched)
+    totals = Counter(top_folder(e['image']) for e in worker['entries'])
+    found = Counter(top_folder(row['worker_image']) for row in matched)
     return {
         'matched': matched,
         'only_owner': sorted(e['image'] for sha in mine.keys() - theirs.keys() for e in mine[sha]),

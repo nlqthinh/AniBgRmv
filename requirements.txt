@@ -4,8 +4,12 @@ PySide6
 Pillow
 opencv-python
 numpy
+# RAM/CPU samples in the video reports (Track/Export); also used by the video workers.
+psutil
 # Batch CSV reports now use stdlib csv; pandas is not a runtime dependency.
 pyinstaller
+# Tests (bat\run_tests.bat); never bundled into the EXE (AniBGRmv.spec excludes it).
+pytest
 # CUDA 12.8/cuDNN 9 (Windows). CPUExecutionProvider remains available.
 # The CUDA/CUDNN extras supply ONNX Runtime's libraries for all image models.
 onnxruntime-gpu[cuda,cudnn]==1.26.0

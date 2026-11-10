@@ -14,6 +14,7 @@ def _report_path() -> Path:
 def _test_impl() -> dict:
     import numpy as np
     import onnxruntime as ort
+    from .engine import matting_ops as ops
     root = Path(getattr(sys, '_MEIPASS', Path(sys.executable).resolve().parent))
     cfg = json.loads((root/'app_config.json').read_text(encoding='utf-8'))
     opts = ort.SessionOptions()
@@ -21,8 +22,8 @@ def _test_impl() -> dict:
     opts.inter_op_num_threads = 1
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     outputs = {}
-    for label, key, channels in (('UNet','unet_onnx_path',3),
-                                  ('ViTMatte-UNet','vitmatte_unet_onnx_path',4)):
+    for label, key, channels in (('UNet', 'unet_onnx_path', ops.UNET_CHANNELS),
+                                  ('ViTMatte-UNet', 'vitmatte_unet_onnx_path', ops.MATTING_CHANNELS)):
         model = root/cfg['model'][key]
         if not model.is_file():
             raise FileNotFoundError(f'{label}: bundled model missing: {model}')
@@ -33,8 +34,8 @@ def _test_impl() -> dict:
         item = session.get_inputs()[0]
         if len(item.shape) != 4:
             raise RuntimeError(f'{label}: invalid input shape: {item.shape}')
-        data = np.zeros((1,channels,768,768),np.float32)
-        if channels == 4:
+        data = np.zeros(ops.model_input_shape(channels), np.float32)
+        if channels == ops.MATTING_CHANNELS:
             data[:,3,:,:] = .5
         value = session.run(None,{item.name:data})
         if not value or not np.isfinite(value[0]).all():
