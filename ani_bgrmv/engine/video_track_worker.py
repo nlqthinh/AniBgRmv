@@ -3,6 +3,10 @@
 Uses the SysCV HQ-SAM2 Video Predictor, its temporal memory and bidirectional
 propagation. NOT optical flow. Arguments: path to a trusted JSON job. No network,
 model downloads or automatic dependency installation.
+
+The app always sends HQ3 (HQ-SAM2 Large + fine-tuned decoder). A job may name
+another SAM2.1 config, no decoder (a released checkpoint as is) and another
+input size: tools/compare_track_models.py uses that to measure smaller models.
 """
 from __future__ import annotations
 
@@ -19,6 +23,8 @@ except ImportError:
 from pathlib import Path
 
 PROGRESS_PREFIX = '__ANIBGRMV_VIDEO_TRACK__'
+# HQ3 = this config + the base checkpoint + the notebook's fine-tuned decoder.
+HQ_CONFIG = 'configs/sam2.1/sam2.1_hq_hiera_l.yaml'
 # Decoder checkpoint format written by the HQ-SAM training notebook.
 DECODER_FORMAT = 'HQ2_HQSAM2_decoder_state_v2'
 # Defaults of SAM2 load_video_frames (init_state does not override them).
@@ -97,23 +103,32 @@ def _configure_stdio():
             reconfigure(encoding='utf-8', errors='backslashreplace')
 
 
-def load_predictor(base: Path, decoder: Path, device: str):
-    """HQ-SAM2 video predictor as in the notebook: base weights, then the fine-tuned decoder."""
+def load_predictor(base: Path, decoder: Path | None, device: str, config: str = HQ_CONFIG,
+                   image_size: int | None = None):
+    """SAM2 video predictor.
+
+    App Track (defaults): HQ-SAM2 as in the notebook, base weights then the
+    fine-tuned decoder. ``decoder`` None: a released SAM2.1 checkpoint (plain
+    SAM2 config) as is. ``image_size``: input size instead of the config's 1024.
+    """
     import torch
-    from sam2.build_sam import build_sam2_hq_video_predictor
+    if decoder is None:
+        from sam2.build_sam import build_sam2_video_predictor as build
+    else:
+        from sam2.build_sam import build_sam2_hq_video_predictor as build
+    overrides = ['++model.add_all_frames_to_correct_as_cond=true']
+    if image_size:
+        overrides.append(f'++model.image_size={int(image_size)}')
     with torch.inference_mode(False):
-        model = build_sam2_hq_video_predictor(
-            'configs/sam2.1/sam2.1_hq_hiera_l.yaml', str(base),
-            device=device, mode='eval',
-            hydra_overrides_extra=['++model.add_all_frames_to_correct_as_cond=true'],
-        )
-        checkpoint = torch.load(str(decoder), map_location='cpu', weights_only=True)
-        if (not isinstance(checkpoint, dict)
-                or checkpoint.get('format') != DECODER_FORMAT
-                or not isinstance(checkpoint.get('decoder'), dict)):
-            raise ValueError('Checkpoint decoder HQ-SAM không đúng định dạng của app.')
-        model.sam_mask_decoder.load_state_dict(checkpoint['decoder'], strict=True)
-        del checkpoint
+        model = build(config, str(base), device=device, mode='eval', hydra_overrides_extra=overrides)
+        if decoder is not None:
+            checkpoint = torch.load(str(decoder), map_location='cpu', weights_only=True)
+            if (not isinstance(checkpoint, dict)
+                    or checkpoint.get('format') != DECODER_FORMAT
+                    or not isinstance(checkpoint.get('decoder'), dict)):
+                raise ValueError('Checkpoint decoder HQ-SAM không đúng định dạng của app.')
+            model.sam_mask_decoder.load_state_dict(checkpoint['decoder'], strict=True)
+            del checkpoint
     model.eval()
     # Inference only. Weights that require grad are cached by autocast as an
     # extra FP16 copy for the whole Track (~0.45 GB for HQ-SAM2 Large); on a
@@ -188,7 +203,9 @@ def run(job_file: Path):
 
     job = json.loads(job_file.read_text(encoding='utf-8'))
     base = Path(job['base_checkpoint'])
-    best = Path(job['decoder_checkpoint'])
+    best = Path(job['decoder_checkpoint']) if job['decoder_checkpoint'] else None
+    config = job.get('model_config', HQ_CONFIG)
+    image_size = job.get('image_size')
     frame_paths = [Path(p) for p in job['frame_paths']]
     output = Path(job['output_dir'])
     count = len(frame_paths)
@@ -211,8 +228,8 @@ def run(job_file: Path):
             raise RuntimeError(f'Không tìm thấy GPU {device} trong PyTorch.')
         torch.cuda.set_device(device)
     for asset in (base, best):
-        if not asset.is_file():
-            raise FileNotFoundError('Thiếu checkpoint HQ-SAM cho video: ' + str(asset))
+        if asset is not None and not asset.is_file():
+            raise FileNotFoundError('Thiếu checkpoint SAM2 cho video: ' + str(asset))
     if not frame_paths or not all(p.is_file() for p in frame_paths):
         raise FileNotFoundError('Thiếu frame video tạm cho Track.')
     if not annotations or not any(p.is_file() for p in annotations.values()):
@@ -246,8 +263,8 @@ def run(job_file: Path):
     snapshot('before_model_load')
     model_t0 = now()
     emit({'event': 'status', 'stage': 'loading', 'percent': 1,
-          'message': 'Đang nạp HQ-SAM2 Video Predictor + decoder đã fine-tune...'})
-    model = load_predictor(base, best, device)
+          'message': 'Đang nạp SAM2 Video Predictor...'})
+    model = load_predictor(base, best, device, config, image_size)
     # Each frame attends to every keyframe (-1) or to the N closest in time.
     # The cost grows with keyframes x objects (App_13 report, GTX 1650:
     # 15 keyframes x 2 objects ~ 58% of each frame); 0 keeps HQ-SAM2's default.
@@ -255,7 +272,9 @@ def run(job_file: Path):
     stages['load_model'] = qseconds(now()-model_t0)
     snapshot('after_model_load')
     precision, matmul_speed = choose_precision(requested_precision, device)
-    worker_report.update(precision=precision, precision_requested=requested_precision,
+    worker_report.update(model_config=config, fine_tuned_decoder=best is not None,
+                         image_size=image_size,  # None = the config's (1024)
+                         precision=precision, precision_requested=requested_precision,
                          matmul_tflops=matmul_speed, keyframes_in_memory=keyframes_in_memory,
                          attention_all_kernels=configure_attention(precision))
 

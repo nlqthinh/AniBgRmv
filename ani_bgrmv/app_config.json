@@ -41,6 +41,7 @@
     "vitmatte_sam_onnx_path": "models/m71_hq3_d0d_best.onnx",
     "export_background": "blue",
     "track_keyframes_in_memory": 4,
-    "reuse_held_frames": true
+    "reuse_held_frames": true,
+    "track_image_size": 768
   }
 }

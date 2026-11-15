@@ -1,4 +1,10 @@
-"""Persistent per-job video logs; never put checkpoints or image pixels in logs."""
+"""Persistent per-job video logs; never put checkpoints or image pixels in logs.
+
+One exception, masks only: a Track keeps its keyframes and final masks as
+label maps (video_track.KEYFRAME_DIR, MASK_DIR) for the replay tools
+(compare_track_models.py, clean_plate_preview.py);
+tools/collect_video_diagnostics.py never zips them.
+"""
 from __future__ import annotations
 
 import csv

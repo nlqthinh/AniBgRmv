@@ -77,6 +77,9 @@ DEFAULT_APP_CONFIG = {
         # default) or only at the N closest in time (2/4/8): faster with many
         # keyframes. Settings shows it; the Track report compares the masks.
         "track_keyframes_in_memory": 0,
+        # HQ-SAM2 Track input size: 1024 (as trained) or 768, about 2x faster
+        # on a GTX 1650 with masks ~0.97 IoU of 1024 (tools/compare_track_models.py).
+        "track_image_size": 1024,
         # A frame repeating the earlier picture around the object (anime holds
         # a drawing 2-3 frames) reuses its mask after Track and its alpha at
         # Export, so held hair does not flicker (engine/video_holds.py).
@@ -128,6 +131,7 @@ ALLOWED_VALUES = {
     ("video", "export_background"): ("green", "blue", "transparent"),
     ("video", "track_precision"): ("auto", "fp16", "fp32"),
     ("video", "track_keyframes_in_memory"): (0, 2, 4, 8),
+    ("video", "track_image_size"): (1024, 768),
     ("model_settings", "video_backend"): ("hqsam2",),
 }
 BOOL_KEYS = (

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QGridLayout, QHBoxLayout,
 
 from pathlib import Path
 
+from ..app_config import ALLOWED_VALUES, DEFAULT_APP_CONFIG
 from ..compute_selection import current_selection
 from ..device_management import GpuScanThread
 from ..model_settings import current_models, default_models, stored_model, validate_import
@@ -27,7 +28,14 @@ VIDEO_OPTIONS = {
     'video_held_frames': (
         (('Giữ hình: dùng chung', True), ('Tính riêng từng frame', False)),
         'Frame lặp lại hình của frame trước quanh viền object dùng chung mask (sau Track) '
-        'và alpha (khi Export), để tóc không nhấp nháy.'),
+        'và alpha (khi Export), để tóc không nhấp nháy. Frame lặp lại cả khung hình không '
+        'cần Track nên Track nhanh hơn.'),
+    'video_track_size': (
+        tuple((f'Ảnh vào {size}' + (' (chuẩn)' if size == DEFAULT_APP_CONFIG['video']['track_image_size']
+                                    else ' (nhanh hơn)'), size)
+              for size in ALLOWED_VALUES[('video', 'track_image_size')]),
+        'Cỡ ảnh HQ-SAM2 nhìn khi Track. 768 nhanh khoảng gấp đôi trên GTX 1650, mask khớp '
+        'bản 1024 khoảng 97%; khe hẹp (giữa hai chân) dễ bị lấp hơn một chút.'),
 }
 
 
@@ -238,6 +246,7 @@ class ComputeStatusPage(QWidget):
         grid.addWidget(track_label, 6, 0)
         combo(6, 1, 'video_track_keyframes')
         combo(6, 2, 'video_held_frames')
+        combo(6, 3, 'video_track_size')
         future = QLabel('Xóa object (tương lai)')
         future.setStyleSheet('font-size: 14px; color: #8A96A7;')
         grid.addWidget(future, 7, 0, 1, 5, Qt.AlignCenter)

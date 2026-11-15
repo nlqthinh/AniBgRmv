@@ -19,7 +19,7 @@ MODEL_KEYS = (
     'single_auto', 'single_vit', 'single_sam', 'single_sam_vit',
     'batch_auto', 'batch_vit',
     'video_backend', 'video_sam', 'video_sam_vit', 'video_export_background',
-    'video_track_keyframes', 'video_held_frames',
+    'video_track_keyframes', 'video_held_frames', 'video_track_size',
 )
 # Settings choice -> model_registry role(s) whose file it selects.
 CHOICE_ROLES = {
@@ -50,7 +50,8 @@ def _models(data: dict) -> dict:
                   video_sam_vit=(data['video']['matting_export'], model_value('video_vitmatte_sam', data)),
                   video_export_background=data['video']['export_background'],
                   video_track_keyframes=data['video']['track_keyframes_in_memory'],
-                  video_held_frames=data['video']['reuse_held_frames'])
+                  video_held_frames=data['video']['reuse_held_frames'],
+                  video_track_size=data['video']['track_image_size'])
     return models
 
 
@@ -174,6 +175,8 @@ def validate_choice(models: dict) -> None:
         raise ValueError('Track: số keyframe nhớ lại chỉ nhận Tất cả, 8, 4 hoặc 2.')
     if not isinstance(models['video_held_frames'], bool):
         raise ValueError('Frame giữ hình phải là bật/tắt.')
+    if models['video_track_size'] not in config.ALLOWED_VALUES[('video', 'track_image_size')]:
+        raise ValueError('Track: ảnh vào chỉ nhận 1024 hoặc 768.')
 
 
 def _to_config(models: dict, original: dict) -> dict:
@@ -200,6 +203,7 @@ def _to_config(models: dict, original: dict) -> dict:
     video['export_background'] = models['video_export_background']
     video['track_keyframes_in_memory'] = models['video_track_keyframes']
     video['reuse_held_frames'] = models['video_held_frames']
+    video['track_image_size'] = models['video_track_size']
     updated.setdefault('sam', {}).pop('cpu_guided_backend', None)  # unused legacy key
     updated.setdefault('model_settings', {}).update(
         batch_vit_enabled=models['batch_vit'] is not None,

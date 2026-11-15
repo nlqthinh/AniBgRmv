@@ -8,7 +8,9 @@ edit touches another object. Every edited frame becomes a keyframe (yellow
 mark on the timeline; click it, then Delete removes it); Track (HQ-SAM2 Video
 Predictor, its own process) follows each object with its own memory, over the
 whole clip or, with ◀ Track lùi / Track tiến ▶, only from the current keyframe
-to the next one; Export keeps all objects as one alpha. See
+to the next one; Export keeps all objects as one alpha. "Dùng lại Track cũ"
+imports an earlier Track of the same clip from its log folder (keyframes, and
+the masks of a finished whole-clip Track) instead of tracking again. See
 engine/video_objects.py.
 """
 from __future__ import annotations
@@ -31,6 +33,7 @@ from ..engine import video_holds as vh
 from ..engine import video_objects as vo
 from ..engine.box_prompt import normalized_box
 from ..engine.video_diagnostics import create_run
+from ..engine.video_track import load_track_log
 from ..engine.video_pipeline import (FramePreview, VideoCanceled, VideoClip, VideoFormatError,
                                      blank_alpha, cleanup_legacy_matting_cache, export_destination,
                                      export_video, extract_clip, paint_alpha, probe_video,
@@ -176,6 +179,7 @@ class VideoCutPage(QWidget):
         self.brush_slider.valueChanged.connect(self._brush_changed)
         self.tint_slider.valueChanged.connect(self._tint_changed)
         self.btn_stop.clicked.connect(self.stop_task)
+        self.btn_import.clicked.connect(self.import_track)
         self.btn_undo.clicked.connect(self.undo)
         self.btn_redo.clicked.connect(self.redo)
         self.btn_track.clicked.connect(lambda: self.track())
@@ -271,6 +275,12 @@ class VideoCutPage(QWidget):
         self.btn_stop.setStyleSheet(CANCEL_BUTTON_STYLE)
         self.btn_stop.hide()
         panel.addWidget(self.btn_stop)
+        self.btn_import = QPushButton('Dùng lại Track cũ…')
+        self.btn_import.setToolTip(
+            'Nạp lại keyframe của một lần Track trước của CHÍNH video (và đoạn cắt) này, từ thư mục '
+            'log [Đường dẫn lưu]\\_diagnostics\\[thời gian]_track_[mã]. Nếu đó là lần Track cả clip '
+            'đã xong thì nạp luôn mask: Export được ngay, không phải Track lại.')
+        panel.addWidget(self.btn_import)
         (self.btn_undo, self.btn_redo), row = button_row('Undo', 'Redo')
         panel.addLayout(row)
         self.btn_track = QPushButton('Track')
@@ -324,7 +334,7 @@ class VideoCutPage(QWidget):
         has_object = has_clip and self.edits.active is not None
         for widget in (self.btn_new_object, self.object_list, self.btn_guided, self.btn_manual,
                        self.btn_paint, self.btn_box, self.btn_fit, self.btn_play, self.timeline,
-                       self.btn_track, self.edit_canvas.btn_close, self.tint_slider):
+                       self.btn_track, self.btn_import, self.edit_canvas.btn_close, self.tint_slider):
             widget.setEnabled(has_clip)
         for widget in (self.btn_merge, self.btn_drop, self.btn_erase, self.btn_clear, self.btn_restore):
             widget.setEnabled(has_object)
@@ -606,6 +616,9 @@ class VideoCutPage(QWidget):
         first, last = result.frames[0], result.frames[-1]
         text = (f'HQ-SAM2 Track {len(result.frames)} frame' if len(result.frames) == self.clip.count
                 else f'HQ-SAM2 Track frame {first + 1}–{last + 1} ({len(result.frames)} frame)')
+        if result.sam_frames < len(result.frames):
+            text += (f' (SAM2 chạy {result.sam_frames} frame; '
+                     f'{len(result.frames) - result.sam_frames} frame lặp lại cả khung hình dùng mask frame trước)')
         if result.held:
             text += f', {len(result.held)} frame giữ hình dùng chung mask'
         if result.agreement:
@@ -871,6 +884,43 @@ class VideoCutPage(QWidget):
         self._run_job('track', VideoJob('track', self.clip, dict(self.edits.keyframes),
                                         report_dir=str(report_dir), previous=previous,
                                         frames=frames))
+
+    def import_track(self):
+        """Keyframes (and masks, from a finished whole-clip Track) of an earlier
+        Track of this clip, from its log folder: no Track again."""
+        if not self.clip or self.is_busy:
+            return
+        logs = Path(self.output_dir) / '_diagnostics'
+        folder = QFileDialog.getExistingDirectory(self, 'Chọn thư mục log Track (…_track_…)',
+                                                  str(logs if logs.is_dir() else self.output_dir))
+        if not folder:
+            return
+        try:
+            log = load_track_log(Path(folder), self.clip)
+        except VideoFormatError as exc:
+            QMessageBox.warning(self, 'Không dùng được log này', str(exc))
+            return
+        if (self.edits.keyframes or self.tracked is not None) and not self._confirm_replace():
+            return
+        self._forget_track_result()
+        if log.masks is not None:
+            self.tracked, self.held, self._tracked_keyframes = log.masks, log.held, dict(log.keyframes)
+        self.edits = vo.from_track_log(log.keyframes, log.masks or ())
+        self.history.clear()
+        self._show_frame()
+        self.status_label.setText(
+            f'Đã nạp {len(log.keyframes)} keyframe từ {Path(folder).name}. '
+            + ('Có mask Track cả clip: Export được ngay, hoặc sửa rồi Track lại.' if log.masks is not None
+               else 'Log này không có mask Track cả clip: bấm Track để chạy lại.'))
+
+    def _confirm_replace(self) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Warning, 'Dùng lại Track cũ',
+                          'Thay keyframe và kết quả Track hiện tại bằng log đã chọn?\n'
+                          'Không Undo được.', parent=self)
+        replace = box.addButton('Thay', QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(box.addButton('Hủy', QMessageBox.ButtonRole.RejectRole))
+        box.exec()
+        return box.clickedButton() is replace
 
     def track_span(self, forward: bool):
         """◀ Track lùi / Track tiến ▶: from the current keyframe to the next one."""

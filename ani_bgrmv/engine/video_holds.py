@@ -19,6 +19,14 @@ The test compares the Track proxies (what SAM2 sees):
 Each frame is compared with its source, not with the previous frame, so a slow
 drift cannot pile up along a run.
 
+Before Track (picture_holds, App_04 of Ver11_11_2026): a frame whose *whole*
+picture repeats its source (same structure test, shake compensated, at most
+MIN_TOLERANCE_PIXELS changed anywhere) is not sent to SAM2; it takes its
+source's mask. The band is part of the picture and allows at least as many
+changed pixels, so such a frame also passes the band test after Track (exactly
+so without a shake): it gets the mask the band test would have given it, without
+SAM2 spending time on it.
+
 Measured on 24frame.mp4 (App_15, 1280x720 proxies): held drawings with lights
 changing behind them: 0-1 band pixels above 16; frames 11->13 (0.5 px shake):
 268 -> 55 pixels (0.05%) after compensation; moving drawings: > 0.5%.
@@ -60,15 +68,20 @@ def _scaled(distance: float, shape) -> float:
     return distance * max(shape) / PROXY_LONG_EDGE
 
 
-def _view(path, mask) -> _View:
+def _structure(path) -> np.ndarray:
+    """Lines and strands of a proxy frame: grayscale minus its blur."""
     picture = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if picture is None:
         raise FileNotFoundError('Không đọc được frame proxy ' + str(path))
-    mask = np.asarray(mask) > 0
-    if picture.shape[:2] != mask.shape:
-        raise ValueError(f'Mask {mask.shape} khác frame proxy {picture.shape[:2]}.')
     gray = cv2.cvtColor(cv2.GaussianBlur(picture, (3, 3), 0), cv2.COLOR_BGR2GRAY).astype(np.float32)
-    return _View(gray - cv2.GaussianBlur(gray, (0, 0), _scaled(STRUCTURE_SIGMA, mask.shape)), mask)
+    return gray - cv2.GaussianBlur(gray, (0, 0), _scaled(STRUCTURE_SIGMA, gray.shape))
+
+
+def _view(path, mask) -> _View:
+    structure, mask = _structure(path), np.asarray(mask) > 0
+    if structure.shape != mask.shape:
+        raise ValueError(f'Mask {mask.shape} khác frame proxy {structure.shape}.')
+    return _View(structure, mask)
 
 
 def _band(earlier: _View, later: _View) -> np.ndarray:
@@ -95,7 +108,8 @@ def _shake(a: np.ndarray, b: np.ndarray, band: np.ndarray):
     if w < 16 or h < 16:
         return None
     window = cv2.createHanningWindow((w, h), cv2.CV_32F)
-    (dx, dy), response = cv2.phaseCorrelate(a[y:y + h, x:x + w], b[y:y + h, x:x + w], window)
+    # Copies: phaseCorrelate windows a contiguous input in place (a band as big as the frame)
+    (dx, dy), response = cv2.phaseCorrelate(a[y:y + h, x:x + w].copy(), b[y:y + h, x:x + w].copy(), window)
     if response < MIN_SHIFT_RESPONSE or math.hypot(dx, dy) > _scaled(MAX_SHIFT, a.shape):
         return None
     return dx, dy
@@ -110,34 +124,54 @@ def shifted(plane: np.ndarray, dx: float, dy: float, interpolation=cv2.INTER_NEA
                           flags=interpolation, borderMode=cv2.BORDER_REPLICATE)
 
 
-def _match(earlier: _View, later: _View) -> tuple[float, float] | None:
-    """The shift with which ``later`` holds ``earlier``, or None."""
-    band = _band(earlier, later)
-    allowed = max(MIN_TOLERANCE_PIXELS, HOLD_TOLERANCE * np.count_nonzero(band))
-    if _changed(earlier.structure, later.structure, band) <= allowed:
+def _match(earlier: np.ndarray, later: np.ndarray, band: np.ndarray,
+           allowed: float) -> tuple[float, float] | None:
+    """The shift with which structure ``later`` holds ``earlier`` inside ``band``, or None."""
+    if _changed(earlier, later, band) <= allowed:
         return 0.0, 0.0
-    shake = _shake(earlier.structure, later.structure, band)
+    shake = _shake(earlier, later, band)
     if shake is None:
         return None
-    moved = shifted(earlier.structure, *shake, interpolation=cv2.INTER_LINEAR)
-    return shake if _changed(moved, later.structure, band) <= allowed else None
+    moved = shifted(earlier, *shake, interpolation=cv2.INTER_LINEAR)
+    return shake if _changed(moved, later, band) <= allowed else None
 
 
-def held_frames(frame_paths, masks, keep=frozenset()) -> tuple[Hold, ...]:
-    """For every frame, the earlier frame it holds (itself, shift 0, if none).
-
-    ``masks``: per frame, nonzero = object (label maps or 0/255 masks).
-    Frames in ``keep`` (user keyframes) always stand for themselves.
-    """
-    if len(frame_paths) != len(masks):
-        raise ValueError('Số frame proxy khác số mask.')
+def _runs(views, match, keep) -> tuple[Hold, ...]:
+    """Each view against the source of its run; ``match(source, view)`` gives the shift or None."""
     holds, reference = [], None
-    for index, (path, mask) in enumerate(zip(frame_paths, masks)):
-        view = _view(path, mask)
-        shake = None if reference is None or index in keep else _match(reference, view)
+    for index, view in enumerate(views):
+        shake = None if reference is None or index in keep else match(reference, view)
         if shake is None:
             holds.append(Hold(index))
             reference = view
         else:
             holds.append(Hold(holds[-1].source, round(shake[0], 2), round(shake[1], 2)))
     return tuple(holds)
+
+
+def held_frames(frame_paths, masks, keep=frozenset()) -> tuple[Hold, ...]:
+    """For every frame, the earlier frame it holds around the object (itself, shift 0, if none).
+
+    ``masks``: per frame, nonzero = object (label maps or 0/255 masks).
+    Frames in ``keep`` (user keyframes) always stand for themselves.
+    """
+    if len(frame_paths) != len(masks):
+        raise ValueError('Số frame proxy khác số mask.')
+
+    def match(earlier: _View, later: _View):
+        band = _band(earlier, later)
+        allowed = max(MIN_TOLERANCE_PIXELS, HOLD_TOLERANCE * np.count_nonzero(band))
+        return _match(earlier.structure, later.structure, band, allowed)
+
+    return _runs((_view(p, m) for p, m in zip(frame_paths, masks)), match, keep)
+
+
+def picture_holds(frame_paths, keep=frozenset()) -> tuple[Hold, ...]:
+    """Before Track: for every frame, the earlier frame whose whole picture it repeats.
+
+    Stricter than held_frames (see the module notes), so it needs no mask.
+    """
+    def match(earlier: np.ndarray, later: np.ndarray):
+        return _match(earlier, later, np.ones(later.shape, bool), MIN_TOLERANCE_PIXELS)
+
+    return _runs((_structure(p) for p in frame_paths), match, keep)

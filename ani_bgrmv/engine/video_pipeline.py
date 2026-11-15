@@ -395,29 +395,64 @@ def _source_frames(clip: VideoClip):
         cap.release()
 
 
-def _compose(clip: VideoClip, output, alpha_of, foreground: bool, report_progress, cancel):
+def _compose(clip: VideoClip, output, alpha_of, foreground: bool, report_progress, cancel, holds):
     """Every frame: alpha, foreground colours, composite, on COMPOSE_THREADS
-    threads (OpenCV and NumPy release the GIL); written in frame order."""
-    def render(i, frame):
+    threads (OpenCV and NumPy release the GIL); written in frame order.
+
+    A frame held without a shift (``holds``, checked against the exported masks)
+    has its source's alpha: it takes the source's alpha and soft-edge colours
+    instead of reading and estimating them again (~75% of a frame's work), so
+    held edges also keep the same colour. Its opaque pixels are its own.
+
+    Returns where the time went, for the Export report: decoding and writing
+    happen here in order; ``wait_render`` is time spent waiting for the threads.
+    """
+    def colours(i, frame, source_job):
+        if source_job is not None:
+            _, alpha, source_colours = source_job.result()  # submitted earlier: running or done
+            soft = (alpha > 0) & (alpha < 255)
+            frame = frame.copy()
+            frame[soft] = source_colours[soft]
+            return alpha, frame
         alpha = alpha_of(i)
-        if foreground:
-            frame = estimate_foreground(frame, alpha.astype(np.float32) / 255.0)
-        return output.render(frame, alpha)
+        return alpha, estimate_foreground(frame, alpha.astype(np.float32) / 255.0) if foreground else frame
+
+    def render(i, frame, source_job):
+        alpha, coloured = colours(i, frame, source_job)
+        return output.render(coloured, alpha), alpha, coloured
 
     threads = max(1, min(COMPOSE_THREADS, os.cpu_count() or 1))
     pending = deque()  # (frame, its render job), in frame order
+    reference = None   # (frame, job) of the last frame that is not held
+    timing = dict.fromkeys(('decode', 'wait_render', 'write'), 0.0)
+    timing['reused_edge_colours'] = 0
 
     def write_oldest():
         index, job = pending.popleft()
-        output.save(index, job.result())
+        t = time.perf_counter()
+        rendered = job.result()[0]
+        timing['wait_render'] += time.perf_counter() - t
+        t = time.perf_counter()
+        output.save(index, rendered)
+        timing['write'] += time.perf_counter() - t
         report_progress(index)
 
     frames = _source_frames(clip)
     with ThreadPoolExecutor(threads) as pool:
         try:
-            for i, frame in enumerate(frames):
+            for i in range(clip.count):
+                t = time.perf_counter()
+                frame = next(frames)
+                timing['decode'] += time.perf_counter() - t
                 _check_cancel(cancel)
-                pending.append((i, pool.submit(render, i, frame)))
+                hold = holds.get(i)
+                same_alpha = foreground and hold is not None and hold.dx == 0 and hold.dy == 0
+                source_job = reference[1] if same_alpha and reference and reference[0] == hold.source else None
+                timing['reused_edge_colours'] += source_job is not None
+                job = pool.submit(render, i, frame, source_job)
+                pending.append((i, job))
+                if hold is None:
+                    reference = (i, job)
                 if len(pending) > 2 * threads:  # bounded memory: ~2 frames per thread
                     write_oldest()
             while pending:
@@ -426,6 +461,7 @@ def _compose(clip: VideoClip, output, alpha_of, foreground: bool, report_progres
             frames.close()
             for _, job in pending:
                 job.cancel()
+    return {key: round(value, 3) for key, value in timing.items()}
 
 
 def export_video(clip: VideoClip, masks: tuple[np.ndarray, ...], dest: str,
@@ -439,7 +475,8 @@ def export_video(clip: VideoClip, masks: tuple[np.ndarray, ...], dest: str,
     source's alpha moved by the shake, so held hair does not flicker. Binary
     mode stays usable for the CPU edition and codec self-tests. Frames keep
     the Track fps (clip.output_fps); there is no audio. ``foreground``
-    recolours soft edges of every frame (foreground.py) before compositing.
+    recolours soft edges (foreground.py) before compositing; a frame held
+    without a shift takes its source's edge colours.
     """
     holds = dict(holds or {})
     if len(masks) != clip.count:
@@ -493,8 +530,8 @@ def export_video(clip: VideoClip, masks: tuple[np.ndarray, ...], dest: str,
                 progress(start + round(span*(index+1)/clip.count),
                          f'Đang xuất {kind} {index+1}/{clip.count}')
         compose_t0 = time.perf_counter()
-        _compose(clip, output, _alpha_reader(clip, masks, alpha_files, holds),
-                 foreground, compose_progress, cancel)
+        report['compose_sec'] = _compose(clip, output, _alpha_reader(clip, masks, alpha_files, holds),
+                                         foreground, compose_progress, cancel, holds)
         _check_cancel(cancel)
         output.commit()
         report['stages_sec']['compose_' + kind.lower()] = round(time.perf_counter()-compose_t0,3)

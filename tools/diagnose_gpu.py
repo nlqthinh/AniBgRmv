@@ -11,7 +11,6 @@ This tool never installs software, edits config, or enables a CPU fallback.
 import os
 import subprocess
 import sys
-import traceback
 
 
 def line(label, value):
@@ -19,7 +18,7 @@ def line(label, value):
 
 
 def main():
-    print("=== AniBgRmv GPU diagnosis (M35) ===", flush=True)
+    print("=== AniBgRmv GPU diagnosis ===", flush=True)
     line("Python executable", sys.executable)
     line("Python version", sys.version.split()[0])
     line("CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES", "<not set>"))

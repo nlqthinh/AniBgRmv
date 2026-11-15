@@ -153,6 +153,18 @@ def after_track(edits: ObjectEdits) -> ObjectEdits:
     return replace(edits, relabel={})
 
 
+def objects_in(label_maps: Sequence[np.ndarray]) -> tuple[int, ...]:
+    """Object ids present in any of these label maps, ascending."""
+    present = sum(np.bincount(labels.ravel(), minlength=256) > 0 for labels in label_maps)
+    return tuple(int(i) for i in np.flatnonzero(present[1:]) + 1)
+
+
+def from_track_log(keyframes: Mapping[int, np.ndarray], masks: Sequence[np.ndarray] = ()) -> ObjectEdits:
+    """Editing state of an imported Track: its keyframes, every object it shows."""
+    objects = objects_in((*keyframes.values(), *masks))
+    return ObjectEdits(keyframes=keyframes, objects=objects, active=objects[0] if objects else None)
+
+
 def shares(labels: np.ndarray, objects: Sequence[int]) -> dict[int, float]:
     """Share of the frame each object covers (for the object list)."""
     counts = np.bincount(labels.ravel(), minlength=256)
@@ -166,9 +178,8 @@ def track_agreement(old: Sequence[np.ndarray], new: Sequence[np.ndarray]) -> dic
     """
     if len(old) != len(new):
         raise ValueError('Hai lần Track có số frame khác nhau.')
-    present = sum(np.bincount(f.ravel(), minlength=256) > 0 for f in (*old, *new))
     result = {}
-    for object_id in map(int, np.flatnonzero(present[1:]) + 1):
+    for object_id in objects_in((*old, *new)):
         ious = {}
         for frame, (a, b) in enumerate(zip(old, new)):
             a, b = a == object_id, b == object_id
